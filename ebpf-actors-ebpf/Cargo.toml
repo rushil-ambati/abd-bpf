@@ -1,0 +1,17 @@
+[package]
+name = "ebpf-actors-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ebpf-actors-common = { path = "../ebpf-actors-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "ebpf-actors"
+path = "src/main.rs"
