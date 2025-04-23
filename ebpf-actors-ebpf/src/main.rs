@@ -6,18 +6,29 @@ use core::mem;
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
-    maps::HashMap,
+    maps::{Array, HashMap},
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
+use ebpf_actors_common::{AbdMsgType, ArchivedAbdMsg, ABD_MAGIC, ABD_UDP_PORT};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
     udp::UdpHdr,
 };
+use rkyv::{access_unchecked_mut, munge::munge, seal::Seal};
+
+#[no_mangle]
+static SERVER_ID: u8 = 0;
 
 #[map]
-static COUNTERS: HashMap<u32, u32> = HashMap::<u32, u32>::with_max_entries(1024, 0);
+static TAG: Array<u32> = Array::<u32>::with_max_entries(1, 0);
+
+#[map]
+static VALUE: Array<u32> = Array::<u32>::with_max_entries(1, 0);
+
+#[map]
+static COUNTERS: HashMap<u8, u32> = HashMap::<u8, u32>::with_max_entries(256, 0);
 
 #[xdp]
 pub fn ebpf_actors(ctx: XdpContext) -> u32 {
@@ -28,7 +39,7 @@ pub fn ebpf_actors(ctx: XdpContext) -> u32 {
 }
 
 #[inline(always)]
-fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
+fn ptr_at_mut<T>(ctx: &XdpContext, offset: usize) -> Result<*mut T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = mem::size_of::<T>();
@@ -37,55 +48,169 @@ fn ptr_at<T>(ctx: &XdpContext, offset: usize) -> Result<*const T, ()> {
         return Err(());
     }
 
-    Ok((start + offset) as *const T)
+    Ok((start + offset) as *mut T)
+}
+
+#[inline(always)]
+fn swap_src_dst_mac(eth: &mut EthHdr) {
+    let mut tmp = [0u8; 6];
+    tmp.copy_from_slice(&eth.src_addr);
+    eth.src_addr.copy_from_slice(&eth.dst_addr);
+    eth.dst_addr.copy_from_slice(&tmp);
+}
+
+#[inline(always)]
+fn swap_src_dst_ipv4(iph: &mut Ipv4Hdr) {
+    let tmp = iph.src_addr;
+    iph.src_addr = iph.dst_addr;
+    iph.dst_addr = tmp;
+}
+
+#[inline(always)]
+fn swap_src_dst_udp(udph: &mut UdpHdr) {
+    let tmp = udph.source;
+    udph.source = udph.dest;
+    udph.dest = tmp;
+}
+
+#[inline(always)]
+fn handle_read(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), ()> {
+    munge!(let ArchivedAbdMsg { magic, mut sender, mut type_, mut tag, mut value, counter } = abd_msg);
+
+    if *magic != ABD_MAGIC {
+        return Err(());
+    }
+
+    info!(ctx, "Received READ from sender: {}", *sender);
+
+    let counter = (*counter).to_native();
+    let counter_for_sender = unsafe { COUNTERS.get(&(*sender)) }.unwrap_or(&0);
+    if counter <= *counter_for_sender {
+        info!(
+            ctx,
+            "Dropping ABD message of type Read from sender: {} due to counter (must be > {})",
+            *sender,
+            *counter_for_sender
+        );
+        return Err(());
+    }
+
+    let _ = COUNTERS.insert(&sender, &counter, 0);
+
+    unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
+    *type_ = AbdMsgType::ReadAck as u8;
+    *tag = (*TAG.get(0).unwrap_or(&0)).into();
+    *value = (*VALUE.get(0).unwrap_or(&0)).into();
+
+    Ok(())
+}
+
+#[inline(always)]
+fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), ()> {
+    munge!(let ArchivedAbdMsg { magic, mut sender, mut type_, tag, value, counter } = abd_msg);
+
+    if *magic != ABD_MAGIC {
+        return Err(());
+    }
+
+    info!(ctx, "Received WRITE from sender: {}", *sender);
+
+    let counter = (*counter).to_native();
+    let counter_for_sender = unsafe { COUNTERS.get(&sender) }.unwrap_or(&0);
+    if counter <= *counter_for_sender {
+        info!(
+            ctx,
+            "Dropping ABD message of type Write from sender: {} due to counter (must be > {})",
+            *sender,
+            *counter_for_sender
+        );
+        return Err(());
+    }
+
+    let _ = COUNTERS.insert(&sender, &counter, 0);
+
+    let tag_ptr = TAG.get_ptr_mut(0).unwrap_or(&mut 0);
+    let value_ptr = VALUE.get_ptr_mut(0).unwrap_or(&mut 0);
+
+    if *tag <= unsafe { *tag_ptr } {
+        info!(
+            ctx,
+            "Dropping ABD message of type Write from sender: {} due to tag (must be > {})",
+            *sender,
+            (*tag).to_native(),
+            *tag_ptr
+        );
+        return Err(());
+    }
+
+    unsafe {
+        *tag_ptr = (*tag).into();
+        *value_ptr = (*value).into();
+    }
+
+    unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
+    *type_ = AbdMsgType::WriteAck as u8;
+
+    Ok(())
 }
 
 fn try_ebpf_actors(ctx: XdpContext) -> Result<u32, ()> {
-    let ethhdr: *const EthHdr = ptr_at(&ctx, 0)?;
-    match unsafe { (*ethhdr).ether_type } {
+    let eth: *mut EthHdr = ptr_at_mut(&ctx, 0)?;
+    match unsafe { (*eth).ether_type } {
         EtherType::Ipv4 => {}
         _ => return Ok(xdp_action::XDP_PASS),
     }
 
-    let ipv4hdr: *const Ipv4Hdr = ptr_at(&ctx, EthHdr::LEN)?;
-    let source_addr = u32::from_be(unsafe { (*ipv4hdr).src_addr });
+    let iph: *mut Ipv4Hdr = ptr_at_mut(&ctx, EthHdr::LEN)?;
 
-    let udphdr: *const UdpHdr = match unsafe { (*ipv4hdr).proto } {
-        IpProto::Udp => ptr_at(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?,
+    let udph: *mut UdpHdr = match unsafe { (*iph).proto } {
+        IpProto::Udp => ptr_at_mut(&ctx, EthHdr::LEN + Ipv4Hdr::LEN)?,
         _ => return Ok(xdp_action::XDP_PASS),
     };
 
-    let dest_port = u16::from_be(unsafe { (*udphdr).dest });
-    if dest_port != 1337 {
+    let dest_port = u16::from_be(unsafe { (*udph).dest });
+    if dest_port != ABD_UDP_PORT {
         return Ok(xdp_action::XDP_PASS);
     }
 
     let payload_offset = EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN;
     let payload_len = ctx.data_end() - ctx.data() - payload_offset;
 
-    let inc = b"INC";
-
-    if payload_len < inc.len() + 1 {
+    let msg_start: *mut u8 = ptr_at_mut(&ctx, payload_offset)?;
+    let expected_len = mem::size_of::<ArchivedAbdMsg>();
+    if payload_len < expected_len {
         return Ok(xdp_action::XDP_PASS);
     }
 
-    for i in 0..inc.len() {
-        let byte: *const u8 = ptr_at(&ctx, payload_offset + i)?;
-        if unsafe { *byte } != inc[i] {
-            return Ok(xdp_action::XDP_PASS);
+    let msg_contents = unsafe { core::slice::from_raw_parts_mut(msg_start, expected_len) };
+
+    if ctx.data() + payload_offset + expected_len > ctx.data_end() {
+        return Ok(xdp_action::XDP_PASS);
+    }
+    let abd_msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(msg_contents) };
+
+    match abd_msg.type_.try_into() {
+        Ok(AbdMsgType::Read) => {
+            if handle_read(&ctx, abd_msg).is_err() {
+                return Ok(xdp_action::XDP_DROP);
+            }
         }
+        Ok(AbdMsgType::Write) => {
+            if handle_write(&ctx, abd_msg).is_err() {
+                return Ok(xdp_action::XDP_DROP);
+            }
+        }
+        Ok(AbdMsgType::ReadAck) => return Ok(xdp_action::XDP_DROP),
+        Ok(AbdMsgType::WriteAck) => return Ok(xdp_action::XDP_DROP),
+        _ => return Ok(xdp_action::XDP_PASS),
     }
 
-    let counter = unsafe {COUNTERS.get(&source_addr).unwrap_or(&0) };
-    let new_counter = *counter + 1;
-    let _ = COUNTERS.insert(&source_addr, &new_counter, 0);
+    swap_src_dst_mac(unsafe { &mut *eth });
+    swap_src_dst_ipv4(unsafe { &mut *iph });
+    swap_src_dst_udp(unsafe { &mut *udph });
+    unsafe { (*udph).check = 0 };
 
-    info!(
-        &ctx,
-        "Received INC from IP: {:i}, count: {}", source_addr, new_counter
-    );
-
-    Ok(xdp_action::XDP_DROP)
+    Ok(xdp_action::XDP_TX)
 }
 
 #[cfg(not(test))]

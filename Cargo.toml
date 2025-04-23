@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["ebpf-actors", "ebpf-actors-common", "ebpf-actors-ebpf"]
+members = ["ebpf-actors", "ebpf-actors-common", "ebpf-actors-ebpf", "abd-client"]
 default-members = ["ebpf-actors", "ebpf-actors-common"]
 
 [workspace.dependencies]

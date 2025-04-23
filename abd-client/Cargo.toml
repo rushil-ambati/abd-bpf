@@ -1,0 +1,12 @@
+[package]
+name = "abd-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ebpf-actors-common = { path = "../ebpf-actors-common" }
+rkyv = "0.8.10"
+
+[[bin]]
+name = "abd-client"
+path = "src/main.rs"
