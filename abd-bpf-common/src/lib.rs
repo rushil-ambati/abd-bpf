@@ -28,10 +28,7 @@ impl TryFrom<u8> for AbdMsgType {
 }
 
 #[derive(Archive, Deserialize, Serialize, Debug)]
-#[rkyv(
-    compare(PartialEq),
-    derive(Debug),
-)]
+#[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AbdMsg {
     pub magic: u32,
     pub sender: u8,

@@ -1,10 +1,10 @@
 [package]
-name = "ebpf-actors"
+name = "abd-bpf"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ebpf-actors-common = { path = "../ebpf-actors-common", features = ["user"] }
+abd-bpf-common = { path = "../abd-bpf-common", features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -12,11 +12,18 @@ aya-log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+tokio = { workspace = true, features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "signal",
+] }
+clap = { workspace = true, default-features = true, features = ["derive"] }
 
-clap = { workspace = true, features = ["derive"] }
 [build-dependencies]
-cargo_metadata = { workspace = true }
+anyhow = { workspace = true }
+aya-build = { workspace = true }
 # TODO(https://github.com/rust-lang/cargo/issues/12375): this should be an artifact dependency, but
 # it's not possible to tell cargo to use `-Z build-std` to build it. We cargo-in-cargo in the build
 # script to build this, but we want to teach cargo about the dependecy so that cache invalidation
@@ -29,8 +36,12 @@ cargo_metadata = { workspace = true }
 # Finally note that *any* usage of `artifact = ...` in *any* Cargo.toml in the workspace breaks
 # workflows with stable cargo; stable cargo outright refuses to load manifests that use unstable
 # features.
-ebpf-actors-ebpf = { path = "../ebpf-actors-ebpf" }
+abd-bpf-ebpf = { path = "../abd-bpf-ebpf" }
 
 [[bin]]
-name = "ebpf-actors"
-path = "src/main.rs"
+name = "abd-server"
+path = "src/abd_server.rs"
+
+[[bin]]
+name = "xdp-pass"
+path = "src/xdp_pass.rs"

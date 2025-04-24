@@ -1,0 +1,26 @@
+[package]
+name = "abd-bpf-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abd-bpf-common = { path = "../abd-bpf-common" }
+
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+
+network-types = "0.0.7"
+rkyv = { version = "0.8.10", default-features = false, features = [
+    "bytecheck",
+] }
+
+[build-dependencies]
+which = { workspace = true }
+
+[[bin]]
+name = "abd-server"
+path = "src/abd_server.rs"
+
+[[bin]]
+name = "xdp-pass"
+path = "src/xdp_pass.rs"

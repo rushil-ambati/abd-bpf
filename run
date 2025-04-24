@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# defaults
+NUM_SERVERS=1
+VERBOSE=false
+WRITER_TESTENV="writer"
+TESTENV="sudo tools/testenv/testenv.sh"
+
+usage() {
+  echo "Usage: $0 [-v] [-s NUM_SERVERS]" >&2
+  exit 1
+}
+
+# parse args
+while getopts "vs:" opt; do
+  case $opt in
+    v) VERBOSE=true ;;
+    s) NUM_SERVERS=$OPTARG ;;
+    *) usage ;;
+  esac
+done
+
+# helper fns
+log() { $VERBOSE && echo "$@"; }
+run() {
+  if $VERBOSE; then "$@" ; else "$@" &>/dev/null ; fi
+}
+
+cleanup() {
+  log "Cleaning up..."
+  for i in $(seq 1 "$NUM_SERVERS"); do
+    sudo pkill -f "target/release/abd-server" || true
+    sudo pkill -f "target/release/xdp-pass"   || true
+  done
+}
+trap cleanup EXIT
+
+export RUST_LOG=info
+
+# 1. build
+log "Building…"
+run cargo build --release
+
+# 2. set up servers
+for i in $(seq 1 "$NUM_SERVERS"); do
+  env="server$i"
+
+  log "Setting up testenv: $env"
+  run $TESTENV setup --name "$env" --legacy-ip || true
+
+  log "Attaching xdp-pass to $env"
+  run $TESTENV exec -n "$env" -- target/release/xdp-pass --iface veth0 || true &
+
+  log "Starting abd-server #$i on $env"
+  sudo -E target/release/abd-server --iface "$env" --server-id "$i" &
+done
+
+# 3. set up the writer
+log "Setting up testenv: $WRITER_TESTENV"
+run $TESTENV setup --name "$WRITER_TESTENV" --legacy-ip || true
+log "Attaching xdp-pass to $WRITER_TESTENV"
+run $TESTENV exec -n "$WRITER_TESTENV" -- target/release/xdp-pass --iface veth0 || true &
+
+# 4. wait a moment
+log "Waiting for servers to come up…"
+sleep 1
+
+# 5. run the client from the writer env against each server
+log "Running client against each server…"
+for i in $(seq 1 "$NUM_SERVERS"); do
+  env="server$i"
+  # extract that server’s IP
+  ip=$(
+    $TESTENV -n "$env" status \
+      | awk '/Iface:/ {print $4}' \
+      | cut -d'/' -f1
+  )
+  log "  -> writer -> $env ($ip)"
+  $TESTENV exec -n "$env" -- bash -c "
+    target/release/abd-client $ip $i write 1 42 1 &&
+    target/release/abd-client $ip $i read 2
+  "
+done
+
+# waitz

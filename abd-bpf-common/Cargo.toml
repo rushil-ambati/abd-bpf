@@ -1,5 +1,5 @@
 [package]
-name = "ebpf-actors-common"
+name = "abd-bpf-common"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,9 @@ user = ["aya"]
 
 [dependencies]
 aya = { workspace = true, optional = true }
-rkyv = { version = "0.8.10", default-features = false, features = ["bytecheck"] }
+rkyv = { version = "0.8.10", default-features = false, features = [
+    "bytecheck",
+] }
 
 [lib]
 path = "src/lib.rs"

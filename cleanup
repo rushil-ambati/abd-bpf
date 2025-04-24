@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# adjust this if your testenv shim lives elsewhere
+TESTENV="sudo tools/testenv/testenv.sh"
+
+# grab all the env names listed after "All existing environments:"
+ENVS=$(
+  $TESTENV status \
+    | awk '/All existing environments:/ {p=1; next} p && NF {print $1}'
+)
+
+if [[ -z "$ENVS" ]]; then
+  echo "No testenvs found; nothing to teardown."
+  exit 0
+fi
+
+for env in $ENVS; do
+  echo "Tearing down testenv: $env"
+  $TESTENV teardown --name "$env" || {
+    echo "  ⚠️  failed to teardown $env, continuing…"
+  }
+done
+
+echo "Done."

@@ -3,6 +3,7 @@
 
 use core::mem;
 
+use abd_bpf_common::{AbdMsgType, ArchivedAbdMsg, ABD_MAGIC, ABD_UDP_PORT};
 use aya_ebpf::{
     bindings::xdp_action,
     macros::{map, xdp},
@@ -10,7 +11,6 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::info;
-use ebpf_actors_common::{AbdMsgType, ArchivedAbdMsg, ABD_MAGIC, ABD_UDP_PORT};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -31,8 +31,8 @@ static VALUE: Array<u32> = Array::<u32>::with_max_entries(1, 0);
 static COUNTERS: HashMap<u8, u32> = HashMap::<u8, u32>::with_max_entries(256, 0);
 
 #[xdp]
-pub fn ebpf_actors(ctx: XdpContext) -> u32 {
-    match try_ebpf_actors(ctx) {
+pub fn abd_server(ctx: XdpContext) -> u32 {
+    match try_abd_server(ctx) {
         Ok(ret) => ret,
         Err(_) => xdp_action::XDP_ABORTED,
     }
@@ -81,14 +81,19 @@ fn handle_read(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), ()
         return Err(());
     }
 
-    info!(ctx, "Received READ from sender: {}", *sender);
+    let server_id = unsafe { core::ptr::read_volatile(&SERVER_ID) };
+    info!(
+        ctx,
+        "Server {}: Received READ from sender {}", server_id, *sender
+    );
 
     let counter = (*counter).to_native();
     let counter_for_sender = unsafe { COUNTERS.get(&(*sender)) }.unwrap_or(&0);
     if counter <= *counter_for_sender {
         info!(
             ctx,
-            "Dropping ABD message of type Read from sender: {} due to counter (must be > {})",
+            "Server {}: Dropping READ from sender: {} due to counter (must be > {})",
+            server_id,
             *sender,
             *counter_for_sender
         );
@@ -113,14 +118,19 @@ fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), (
         return Err(());
     }
 
-    info!(ctx, "Received WRITE from sender: {}", *sender);
+    let server_id = unsafe { core::ptr::read_volatile(&SERVER_ID) };
+    info!(
+        ctx,
+        "Server {}: Received WRITE from sender {}", server_id, *sender
+    );
 
     let counter = (*counter).to_native();
     let counter_for_sender = unsafe { COUNTERS.get(&sender) }.unwrap_or(&0);
     if counter <= *counter_for_sender {
         info!(
             ctx,
-            "Dropping ABD message of type Write from sender: {} due to counter (must be > {})",
+            "Server {}: Dropping WRITE from sender {} due to counter (must be > {})",
+            server_id,
             *sender,
             *counter_for_sender
         );
@@ -135,7 +145,8 @@ fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), (
     if *tag <= unsafe { *tag_ptr } {
         info!(
             ctx,
-            "Dropping ABD message of type Write from sender: {} due to tag (must be > {})",
+            "Server {}: Dropping WRITE from sender {} due to tag (must be > {})",
+            server_id,
             *sender,
             (*tag).to_native(),
             *tag_ptr
@@ -154,7 +165,7 @@ fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>) -> Result<(), (
     Ok(())
 }
 
-fn try_ebpf_actors(ctx: XdpContext) -> Result<u32, ()> {
+fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
     let eth: *mut EthHdr = ptr_at_mut(&ctx, 0)?;
     match unsafe { (*eth).ether_type } {
         EtherType::Ipv4 => {}
