@@ -18,6 +18,10 @@ rkyv = { version = "0.8.10", default-features = false, features = [
 which = { workspace = true }
 
 [[bin]]
+name = "abd-writer"
+path = "src/abd_writer.rs"
+
+[[bin]]
 name = "abd-server"
 path = "src/abd_server.rs"
 

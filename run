@@ -66,7 +66,7 @@ run $TESTENV exec -n "$WRITER_TESTENV" -- target/release/xdp-pass --iface veth0 
 log "Waiting for servers to come up…"
 sleep 1
 
-# 5. run the client from the writer env against each server
+# 5. run the client against each server
 log "Running client against each server…"
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
@@ -76,11 +76,8 @@ for i in $(seq 1 "$NUM_SERVERS"); do
       | awk '/Iface:/ {print $4}' \
       | cut -d'/' -f1
   )
-  log "  -> writer -> $env ($ip)"
   $TESTENV exec -n "$env" -- bash -c "
     target/release/abd-client $ip $i write 1 42 1 &&
     target/release/abd-client $ip $i read 2
   "
 done
-
-# waitz

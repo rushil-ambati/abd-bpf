@@ -39,6 +39,10 @@ aya-build = { workspace = true }
 abd-bpf-ebpf = { path = "../abd-bpf-ebpf" }
 
 [[bin]]
+name = "abd-writer"
+path = "src/abd_writer.rs"
+
+[[bin]]
 name = "abd-server"
 path = "src/abd_server.rs"
 
