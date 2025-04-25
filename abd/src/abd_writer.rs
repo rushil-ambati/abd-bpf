@@ -47,16 +47,6 @@ async fn main() -> anyhow::Result<()> {
         .iter()
         .find(|iface| iface.name == redirect_iface)
         .ok_or_else(|| anyhow::anyhow!("Interface {} not found", iface))?;
-    // let redirect_mac_addr_str = redirect_interface
-    //     .mac_addr
-    //     .as_ref()
-    //     .ok_or_else(|| anyhow::anyhow!("Interface {} does not have a MAC address", redirect_iface))?;
-    // let redirect_mac_addr: [u8; 6] = redirect_mac_addr_str
-    //     .split(':')
-    //     .map(|s| u8::from_str_radix(s, 16).unwrap())
-    //     .collect::<Vec<u8>>()
-    //     .try_into()
-    //     .map_err(|_| anyhow::anyhow!("Invalid MAC address format"))?;
 
     // Inner (veth0) of server1
     let redirect_mac_addr: [u8; 6] = [

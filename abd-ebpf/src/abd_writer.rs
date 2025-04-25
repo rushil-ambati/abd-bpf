@@ -9,10 +9,13 @@ use aya_ebpf::{
     macros::classifier,
     programs::TcContext,
 };
-use aya_log_ebpf::info;
+use aya_log_ebpf::{debug, error, info};
 use helpers::parse_abd_packet;
 use rkyv::munge::munge;
 
+// TODO: Provide the writer with a map containing IPs of each server and make it bpf_fib_lookup and bpf_clone_redirect.
+// TODO: Only broadcast write requests. Ignore read requests.
+// TODO: Handle W-ACKs. Ignore R-ACKs.
 #[no_mangle]
 static DST_MAC: [u8; 6] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 
@@ -30,7 +33,7 @@ pub fn abd_writer(ctx: TcContext) -> i32 {
 fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
     let ifindex = unsafe { core::ptr::read_volatile(&IFINDEX) };
     if ifindex == 0 {
-        info!(&ctx, "IFINDEX is not set");
+        error!(&ctx, "IFINDEX is not set");
         return Err(());
     }
 
@@ -43,14 +46,15 @@ fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
 
     info!(
         &ctx,
-        "Redirecting ABD packet (sender: {}, type: {}, tag: {}, value: {}, counter: {}) to interface {}",
+        "Received ABD request (sender: {}, type: {}, tag: {}, value: {}, counter: {})",
         *sender,
         *type_,
         u32::from(*tag),
         u32::from(*value),
         u32::from(*counter),
-        ifindex
     );
+
+    debug!(&ctx, "Redirecting to ifindex: {}", ifindex);
 
     // Set the destination MAC address
     let redirect_dst_mac = unsafe { core::ptr::read_volatile(&DST_MAC) };
@@ -59,6 +63,7 @@ fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
     // Disable UDP checksum
     (*pkt.udph).check = 0;
 
+    // Redirect the packet to the specified interface
     let ret = unsafe { bpf_redirect(ifindex, 0) };
     Ok(ret as i32)
 }

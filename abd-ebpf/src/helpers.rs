@@ -140,6 +140,13 @@ pub fn swap_src_dst_udp(udph: &mut UdpHdr) {
     udph.dest = tmp;
 }
 
+/// Ovewrwrite the source MAC address in the packet
+#[inline(always)]
+#[allow(dead_code)]
+pub fn overwrite_src_mac(eth: &mut EthHdr, src_mac: &[u8; 6]) {
+    eth.src_addr.copy_from_slice(src_mac);
+}
+
 /// Ovewrwrite the destination MAC address in the packet
 #[inline(always)]
 #[allow(dead_code)]
