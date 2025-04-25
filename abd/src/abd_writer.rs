@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Inner (veth0) of server1
     let redirect_mac_addr: [u8; 6] = [
-        0x22, 0x39, 0x36, 0xda, 0x79, 0xc0,
+        0x26, 0x2c, 0xd3, 0x97, 0x81, 0x3b,
     ];
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at

@@ -4,13 +4,12 @@
 mod helpers;
 use abd_common::{AbdMsgType, ArchivedAbdMsg};
 use aya_ebpf::{
-    bindings::xdp_action,
-    macros::{map, xdp},
-    maps::{Array, HashMap},
-    programs::XdpContext,
+    bindings, macros::{map, xdp}, maps::{Array, HashMap}, programs::XdpContext
 };
 use aya_log_ebpf::{info, warn};
 use rkyv::{munge::munge, seal::Seal};
+
+// const AF_INET: u8 = 2;
 
 #[no_mangle]
 static SERVER_ID: u8 = 0;
@@ -28,7 +27,7 @@ static COUNTERS: HashMap<u8, u32> = HashMap::<u8, u32>::with_max_entries(256, 0)
 pub fn abd_server(ctx: XdpContext) -> u32 {
     match try_abd_server(ctx) {
         Ok(ret) => ret,
-        Err(_) => xdp_action::XDP_ABORTED,
+        Err(_) => bindings::xdp_action::XDP_ABORTED,
     }
 }
 
@@ -41,18 +40,18 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
 
     let pkt = match helpers::parse_abd_packet(&ctx) {
         Ok(p) => p,
-        Err(_) => return Ok(xdp_action::XDP_PASS),
+        Err(_) => return Ok(bindings::xdp_action::XDP_PASS),
     };
 
     match pkt.msg.type_.try_into() {
         Ok(AbdMsgType::Read) => {
             if handle_read(&ctx, pkt.msg, server_id).is_err() {
-                return Ok(xdp_action::XDP_DROP);
+                return Ok(bindings::xdp_action::XDP_DROP);
             }
         }
         Ok(AbdMsgType::Write) => {
             if handle_write(&ctx, pkt.msg, server_id).is_err() {
-                return Ok(xdp_action::XDP_DROP);
+                return Ok(bindings::xdp_action::XDP_DROP);
             }
         }
         Ok(AbdMsgType::ReadAck) => {
@@ -62,7 +61,7 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
                 server_id,
                 pkt.msg.sender
             );
-            return Ok(xdp_action::XDP_DROP);
+            return Ok(bindings::xdp_action::XDP_DROP);
         }
         Ok(AbdMsgType::WriteAck) => {
             warn!(
@@ -71,18 +70,49 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
                 server_id,
                 pkt.msg.sender
             );
-            return Ok(xdp_action::XDP_DROP);
+            return Ok(bindings::xdp_action::XDP_DROP);
         }
-        _ => return Ok(xdp_action::XDP_PASS),
+        _ => return Ok(bindings::xdp_action::XDP_PASS),
     }
 
-    helpers::swap_src_dst_mac(pkt.eth);
-    helpers::swap_src_dst_ipv4(pkt.iph);
-    helpers::swap_src_dst_udp(pkt.udph);
     (*pkt.udph).check = 0;
+    helpers::swap_src_dst_udp(pkt.udph);
+    helpers::swap_src_dst_ipv4(pkt.iph);
+    // helpers::swap_src_dst_mac(pkt.eth);
 
-    // TODO: Use bpf_fib_lookup to redirect the response to the correct interface
-    Ok(xdp_action::XDP_TX)
+    // TODO: Use bpf_fib_lookup to set appropriate MACs & redirect the response to the correct interface
+    // Params: https://github.com/torvalds/linux/blob/7deea5634a67700d04c2a0e6d2ffa0e2956fe8ad/include/uapi/linux/bpf.h#L7207
+    // let mut fib_params = bindings::bpf_fib_lookup {
+    //     family: AF_INET,
+    //     l4_protocol: (*pkt.iph).proto as u8,
+    //     sport: (*pkt.udph).source,
+    //     dport: (*pkt.udph).dest,
+    //     __bindgen_anon_1: bindings::bpf_fib_lookup__bindgen_ty_1 {
+    //         tot_len: (*pkt.iph).tot_len,
+    //     },
+    //     __bindgen_anon_2: bindings::bpf_fib_lookup__bindgen_ty_2 {
+    //         tos: (*pkt.iph).tos,
+    //     },
+    //     __bindgen_anon_3: bindings::bpf_fib_lookup__bindgen_ty_3 {
+    //         ipv4_src: (*pkt.iph).src_addr,
+    //     },
+    //     __bindgen_anon_4: bindings::bpf_fib_lookup__bindgen_ty_4 {
+    //         ipv4_dst: (*pkt.iph).dst_addr,
+    //     },
+
+    //     // unused
+    //     __bindgen_anon_5: bindings::bpf_fib_lookup__bindgen_ty_5 {
+    //         tbid: 0,
+    //     },
+
+    //     // outputs
+    //     ifindex: 0,
+    //     smac: [0; 6],
+    //     dmac: [0; 6],
+    // };
+    // bpf_fib_lookup(&ctx, fib_params, size_of::<bindings::bpf_fib_lookup>() as u32, 0);
+
+    Ok(bindings::xdp_action::XDP_TX)
 }
 
 /// Handle a read request

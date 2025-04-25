@@ -1,4 +1,4 @@
-use core::mem;
+use core::mem::size_of;
 
 use abd_common::{ArchivedAbdMsg, ABD_MAGIC, ABD_UDP_PORT};
 use aya_ebpf::programs::{TcContext, XdpContext};
@@ -75,7 +75,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C) -> Result<AbdPacket, ()> {
 
     // Bounds-check that the payload is exactly ArchivedAbdMsg
     let payload_offset = udph_offset + UdpHdr::LEN;
-    let msg_len = mem::size_of::<ArchivedAbdMsg>();
+    let msg_len = size_of::<ArchivedAbdMsg>();
     let start = ctx.data();
     let end = ctx.data_end();
     if start + payload_offset + msg_len > end {
@@ -105,7 +105,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C) -> Result<AbdPacket, ()> {
 pub fn ptr_at_mut<C: PacketBuf, T>(ctx: &C, offset: usize) -> Result<*mut T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = mem::size_of::<T>();
+    let len = size_of::<T>();
     if start + offset + len > end {
         return Err(());
     }
