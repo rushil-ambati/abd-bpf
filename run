@@ -1,83 +1,90 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# defaults
 NUM_SERVERS=1
-VERBOSE=false
-WRITER_TESTENV="writer"
-TESTENV="sudo tools/testenv/testenv.sh"
+TESTENV=(sudo -n tools/testenv/testenv.sh)
+
+sudo -v || { echo "need sudo"; exit 1; }
+
+logrun() {
+  local label=$1
+  shift
+  stdbuf -oL "$@" 2>&1 | sed "s/^/[$label] /"
+}
+
+bg_pids=()
+logrun_bg() {
+  local label=$1
+  shift
+  stdbuf -oL "$@" 2>&1 | tee >(sed "s/^/[$label] /") >/dev/null &
+  bg_pids+=($!)
+}
+
+cleanup() {
+  for pid in "${bg_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
+trap cleanup EXIT SIGINT SIGTERM
 
 usage() {
-  echo "Usage: $0 [-v] [-s NUM_SERVERS]" >&2
+  echo "Usage: $0 [-s NUM_SERVERS]" >&2
   exit 1
 }
 
 # parse args
-while getopts "vs:" opt; do
+while getopts "s:" opt; do
   case $opt in
-    v) VERBOSE=true ;;
     s) NUM_SERVERS=$OPTARG ;;
     *) usage ;;
   esac
 done
 
-# helper fns
-log() { $VERBOSE && echo "$@"; }
-run() {
-  if $VERBOSE; then "$@" ; else "$@" &>/dev/null ; fi
-}
-
-cleanup() {
-  log "Cleaning up..."
-  for i in $(seq 1 "$NUM_SERVERS"); do
-    sudo pkill -f "target/release/abd-server" || true
-    sudo pkill -f "target/release/xdp-pass"   || true
-  done
-}
-trap cleanup EXIT
-
 export RUST_LOG=info
 
 # 1. build
-log "Building…"
-run cargo build --release
+cargo build --release
 
 # 2. set up servers
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
 
-  log "Setting up testenv: $env"
-  run $TESTENV setup --name "$env" --legacy-ip || true
+  "${TESTENV[@]}" setup --name "$env" --legacy-ip || true
 
-  log "Attaching xdp-pass to $env"
-  run $TESTENV exec -n "$env" -- target/release/xdp-pass --iface veth0 || true &
+  # veth devices won't deliver redirected/retransmitted XDP frames unless an XDP program is attached to the receiving side of the target veth interface
+  logrun_bg "$env" "${TESTENV[@]}" exec -n "$env" -- \
+    bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
 
-  log "Starting abd-server #$i on $env"
-  sudo -E target/release/abd-server --iface "$env" --server-id "$i" &
+  logrun_bg "$env" sudo -E target/release/abd-server \
+    --iface "$env" --server-id "$i"
 done
 
 # 3. set up the writer
-log "Setting up testenv: $WRITER_TESTENV"
-run $TESTENV setup --name "$WRITER_TESTENV" --legacy-ip || true
-log "Attaching xdp-pass to $WRITER_TESTENV"
-run $TESTENV exec -n "$WRITER_TESTENV" -- target/release/xdp-pass --iface veth0 || true &
+"${TESTENV[@]}" setup --name writer --legacy-ip || true
+
+logrun_bg "writer" "${TESTENV[@]}" exec -n writer -- \
+  bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
+
+logrun_bg "writer" sudo -E target/release/abd-writer \
+  --iface writer --redirect-iface server1
 
 # 4. wait a moment
-log "Waiting for servers to come up…"
 sleep 1
 
 # 5. run the client against each server
-log "Running client against each server…"
+echo
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
   # extract that server’s IP
   ip=$(
-    $TESTENV -n "$env" status \
+    "${TESTENV[@]}" -n "$env" status \
       | awk '/Iface:/ {print $4}' \
       | cut -d'/' -f1
   )
-  $TESTENV exec -n "$env" -- bash -c "
-    target/release/abd-client $ip $i write 1 42 1 &&
-    target/release/abd-client $ip $i read 2
+  logrun "client" "${TESTENV[@]}" exec -n writer -- bash -c "
+    target/release/abd-client $ip $i write 1 42 1
   "
+  #  && target/release/abd-client $ip $i read 2
 done

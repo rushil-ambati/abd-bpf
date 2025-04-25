@@ -1,6 +1,7 @@
 #![no_std]
 #![no_main]
 
+mod helpers;
 use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
 
 #[xdp]
@@ -11,7 +12,7 @@ pub fn xdp_pass(ctx: XdpContext) -> u32 {
     }
 }
 
-unsafe fn try_xdp_pass(_ctx: XdpContext) -> Result<u32, u32> {
+unsafe fn try_xdp_pass(_ctx: XdpContext) -> Result<u32, ()> {
     Ok(xdp_action::XDP_PASS)
 }
 

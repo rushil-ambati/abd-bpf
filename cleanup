@@ -1,25 +1,57 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# adjust this if your testenv shim lives elsewhere
-TESTENV="sudo tools/testenv/testenv.sh"
+usage() {
+  echo "Usage: $0 [-a]" >&2
+  echo "  -a   Also teardown all testenv namespaces" >&2
+  exit 1
+}
 
-# grab all the env names listed after "All existing environments:"
-ENVS=$(
-  $TESTENV status \
-    | awk '/All existing environments:/ {p=1; next} p && NF {print $1}'
-)
-
-if [[ -z "$ENVS" ]]; then
-  echo "No testenvs found; nothing to teardown."
-  exit 0
-fi
-
-for env in $ENVS; do
-  echo "Tearing down testenv: $env"
-  $TESTENV teardown --name "$env" || {
-    echo "  ⚠️  failed to teardown $env, continuing…"
-  }
+# parse flags
+TEARDOWN=false
+while getopts ":a" opt; do
+  case $opt in
+    a) TEARDOWN=true ;;
+    *) usage ;;
+  esac
 done
+
+# pre‐cache sudo once
+sudo -v || { echo "need sudo"; exit 1; }
+
+# always kill any leftover processes
+sudo -n pkill -f "target/release/abd-client" || true
+sudo -n pkill -f "target/release/abd-writer" || true
+sudo -n pkill -f "target/release/abd-server" || true
+sudo -n pkill -f "target/release/xdp-pass"   || true
+
+if [[ "$TEARDOWN" = true ]]; then
+  TESTENV="sudo -n tools/testenv/testenv.sh"
+
+  # grab all the env names listed after "All existing environments:",
+  # but bail out early if we see "No environments exist"
+  ENVS=$(
+    $TESTENV status \
+      | awk '
+          /All existing environments:/ { p=1; next }
+          p && NF {
+            if ($1 == "No") exit
+            print $1
+          }
+        '
+  )
+
+  if [[ -z "$ENVS" ]]; then
+    echo "No testenvs found; nothing to teardown."
+    exit 0
+  fi
+
+  for env in $ENVS; do
+    echo "Tearing down testenv: $env"
+    $TESTENV teardown --name "$env" || {
+      echo "  ⚠️  failed to teardown $env, continuing…"
+    }
+  done
+fi
 
 echo "Done."

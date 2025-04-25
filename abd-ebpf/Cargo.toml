@@ -1,10 +1,10 @@
 [package]
-name = "abd-bpf-ebpf"
+name = "abd-ebpf"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-abd-bpf-common = { path = "../abd-bpf-common" }
+abd-common = { path = "../abd-common" }
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }

@@ -30,7 +30,7 @@ impl TryFrom<u8> for AbdMsgType {
 #[derive(Archive, Deserialize, Serialize, Debug)]
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AbdMsg {
-    pub magic: u32,
+    pub _magic: u32,
     pub sender: u8,
     pub type_: u8,
     pub tag: u32,
@@ -41,7 +41,7 @@ pub struct AbdMsg {
 impl AbdMsg {
     pub fn new(sender: u8, ty: AbdMsgType, tag: u32, value: u32, counter: u32) -> Self {
         Self {
-            magic: ABD_MAGIC,
+            _magic: ABD_MAGIC,
             sender,
             type_: ty as u8,
             tag,

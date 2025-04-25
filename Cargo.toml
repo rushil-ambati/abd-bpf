@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["abd-bpf", "abd-bpf-common", "abd-bpf-ebpf", "abd-client"]
-default-members = ["abd-bpf", "abd-bpf-common", "abd-client"]
+members = ["abd", "abd-common", "abd-ebpf", "abd-client"]
+default-members = ["abd", "abd-common", "abd-client"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }
@@ -21,6 +21,6 @@ log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 
-[profile.release.package.abd-bpf-ebpf]
+[profile.release.package.abd-ebpf]
 debug = 2
 codegen-units = 1

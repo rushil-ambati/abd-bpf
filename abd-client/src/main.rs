@@ -1,4 +1,4 @@
-use abd_bpf_common::{AbdMsg, AbdMsgType, ArchivedAbdMsg, ABD_UDP_PORT};
+use abd_common::{AbdMsg, AbdMsgType, ArchivedAbdMsg, ABD_UDP_PORT};
 use rkyv::{deserialize, rancor::Error};
 use std::convert::TryInto;
 use std::env;
