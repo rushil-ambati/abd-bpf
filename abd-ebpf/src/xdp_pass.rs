@@ -1,10 +1,11 @@
 #![no_std]
 #![no_main]
 
-mod helpers;
 use aya_ebpf::{bindings::xdp_action, macros::xdp, programs::XdpContext};
 use aya_log_ebpf::debug;
 use network_types::eth::EthHdr;
+
+use abd_ebpf::helpers::ptr_at_mut;
 
 #[xdp]
 pub fn xdp_pass(ctx: XdpContext) -> u32 {
@@ -16,7 +17,7 @@ pub fn xdp_pass(ctx: XdpContext) -> u32 {
 
 unsafe fn try_xdp_pass(ctx: XdpContext) -> Result<u32, ()> {
     // Ethernet → must be IPv4
-    let eth: *mut EthHdr = helpers::ptr_at_mut(&ctx, 0)?;
+    let eth: *mut EthHdr = ptr_at_mut(&ctx, 0)?;
     let src_mac = (*eth).src_addr;
     let dst_mac = (*eth).dst_addr;
 
@@ -28,7 +29,7 @@ unsafe fn try_xdp_pass(ctx: XdpContext) -> Result<u32, ()> {
 }
 
 #[cfg(not(test))]
-#[panic_handler] //
+#[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }

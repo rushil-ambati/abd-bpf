@@ -1,10 +1,9 @@
+use abd::helpers::map_utils::{populate_server_info_map, populate_writer_info_map};
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::EbpfLoader;
 use clap::Parser;
-use log::info;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
-use std::env;
 use tokio::signal;
 
 /// A TC program which implements an ABD writer
@@ -15,18 +14,15 @@ struct Args {
     #[arg(long, default_value = "eth0")]
     iface: String,
 
-    /// Name of the network interface to redirect the packet to
+    /// Number of servers
     #[arg(long)]
-    redirect_iface: String,
+    num_servers: u32,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let Args {
-        iface,
-        redirect_iface,
-    } = args;
+    let Args { iface, num_servers } = args;
 
     env_logger::init();
 
@@ -41,25 +37,12 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {}", ret);
     }
 
-    // Retrieve the redirect interface's index and MAC address
-    let network_interfaces = NetworkInterface::show().unwrap();
-    let redirect_interface = network_interfaces
-        .iter()
-        .find(|iface| iface.name == redirect_iface)
-        .ok_or_else(|| anyhow::anyhow!("Interface {} not found", iface))?;
-
-    // Inner (veth0) of server1
-    let redirect_mac_addr: [u8; 6] = [
-        0x26, 0x2c, 0xd3, 0x97, 0x81, 0x3b,
-    ];
-
     // This will include your eBPF object file as raw bytes at compile-time and load it at
     // runtime. This approach is recommended for most real-world use cases. If you would
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
-        .set_global("IFINDEX", &redirect_interface.index, true)
-        .set_global("DST_MAC", &redirect_mac_addr, true)
+        .set_global("NUM_SERVERS", &num_servers, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/abd-writer"
@@ -68,12 +51,20 @@ async fn main() -> anyhow::Result<()> {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
+
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&iface);
     let program: &mut SchedClassifier = ebpf.program_mut("abd_writer").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, TcAttachType::Ingress)?;
+
+    // Populate the info maps
+    let network_interfaces = NetworkInterface::show().unwrap();
+    let server_info_map = ebpf.map_mut("SERVER_INFO").unwrap();
+    populate_server_info_map(server_info_map, &network_interfaces, num_servers)?;
+    let writer_info_map = ebpf.map_mut("WRITER_INFO").unwrap();
+    populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

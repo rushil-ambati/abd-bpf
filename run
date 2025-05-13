@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NUM_SERVERS=1
+NUM_SERVERS=3
 TESTENV=(sudo -n tools/testenv/testenv.sh)
 
 sudo -v || { echo "need sudo"; exit 1; }
@@ -47,44 +47,46 @@ export RUST_LOG=info
 # 1. build
 cargo build --release
 
-# 2. set up servers
+# 2. setup testenvs
+# veth devices won't deliver redirected/retransmitted XDP frames unless an XDP program is attached to the receiving side of the target veth interface
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
 
-  "${TESTENV[@]}" setup --name "$env" --legacy-ip || true
+  "${TESTENV[@]}" setup --name "$env" --legacy-ip >/dev/null 2>&1 || true
 
-  # veth devices won't deliver redirected/retransmitted XDP frames unless an XDP program is attached to the receiving side of the target veth interface
   logrun_bg "$env" "${TESTENV[@]}" exec -n "$env" -- \
     bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
-
-  logrun_bg "$env" sudo -E target/release/abd-server \
-    --iface "$env" --server-id "$i"
 done
 
-# 3. set up the writer
-"${TESTENV[@]}" setup --name writer --legacy-ip || true
+"${TESTENV[@]}" setup --name writer --legacy-ip >/dev/null 2>&1 || true
 
 logrun_bg "writer" "${TESTENV[@]}" exec -n writer -- \
   bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
 
+# 3. run the servers
+for i in $(seq 1 "$NUM_SERVERS"); do
+  env="server$i"
+
+  logrun_bg "$env" sudo -E target/release/abd-server \
+    --iface "$env" --num-servers="$NUM_SERVERS" --server-id "$i"
+done
+
+# 4. run the writer
 logrun_bg "writer" sudo -E target/release/abd-writer \
-  --iface writer --redirect-iface server1
+  --iface writer --num-servers="$NUM_SERVERS" \
 
 # 4. wait a moment
 sleep 1
 
-# 5. run the client against each server
+# 5. run the client
 echo
-for i in $(seq 1 "$NUM_SERVERS"); do
-  env="server$i"
-  # extract that server’s IP
-  ip=$(
-    "${TESTENV[@]}" -n "$env" status \
-      | awk '/Iface:/ {print $4}' \
-      | cut -d'/' -f1
-  )
-  logrun "client" "${TESTENV[@]}" exec -n writer -- bash -c "
-    target/release/abd-client $ip $i write 1 42 1
-  "
-  # && target/release/abd-client $ip $i read 2
-done
+writer_ip=$(
+  "${TESTENV[@]}" -n writer status \
+    | awk '/Iface:/ {print $4}' \
+    | cut -d'/' -f1
+)
+writer_sender_id=0
+logrun "client" "${TESTENV[@]}" exec -n writer -- bash -c "
+  target/release/abd-client $writer_ip $writer_sender_id write 1 42 1 &&
+  target/release/abd-client $writer_ip $writer_sender_id read 2
+"

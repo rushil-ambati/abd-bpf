@@ -13,5 +13,5 @@ use which::which;
 /// [bindeps]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html?highlight=feature#artifact-dependencies
 fn main() {
     let bpf_linker = which("bpf-linker").unwrap();
-    println!("cargo:rerun-if-changed={}", bpf_linker.to_str().unwrap());
+    println!("cargo::rerun-if-changed={}", bpf_linker.to_str().unwrap());
 }

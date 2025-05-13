@@ -1,7 +1,11 @@
 #![no_std]
 
+use core::net::Ipv4Addr;
+
 use rkyv::{Archive, Deserialize, Serialize};
 
+pub const ABD_SERVER_IFACE_PREFIX: &str = "server";
+pub const ABD_WRITER_IFACE_NAME: &str = "writer";
 pub const ABD_UDP_PORT: u16 = 4242; // UDP port used for ABD messages
 pub const ABD_MAGIC: u32 = 0xdeadbeef;
 
@@ -50,3 +54,14 @@ impl AbdMsg {
         }
     }
 }
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct AbdActorInfo {
+    pub ipv4: Ipv4Addr,
+    pub ifindex: u32,
+    pub mac: [u8; 6],
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for AbdActorInfo {}

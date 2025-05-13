@@ -21,6 +21,7 @@ tokio = { workspace = true, features = [
 ] }
 clap = { workspace = true, default-features = true, features = ["derive"] }
 network-interface = "2.0.1"
+netns-rs = "0.1.0"
 
 [build-dependencies]
 anyhow = { workspace = true }

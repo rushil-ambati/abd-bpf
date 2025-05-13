@@ -1,9 +1,10 @@
-use anyhow::Context as _;
+use abd::helpers::map_utils::{populate_server_info_map, populate_writer_info_map};
+use anyhow::Context;
 use aya::programs::{Xdp, XdpFlags};
 use aya::EbpfLoader;
 use clap::Parser;
-use log::info;
-use log::{debug, warn};
+use log::{debug, info, warn};
+use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use std::env;
 use tokio::signal;
 
@@ -18,12 +19,20 @@ struct Args {
     /// ABD server ID
     #[arg(short, long)]
     server_id: u8,
+
+    /// Number of servers
+    #[arg(long)]
+    num_servers: u32,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let Args { iface, server_id } = args;
+    let Args {
+        iface,
+        server_id,
+        num_servers,
+    } = args;
 
     env_logger::init();
 
@@ -44,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
         .set_global("SERVER_ID", &server_id, true)
+        .set_global("NUM_SERVERS", &num_servers, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/abd-server"
@@ -56,6 +66,13 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+
+    // Populate the info maps
+    let network_interfaces = NetworkInterface::show().unwrap();
+    let server_info_map = ebpf.map_mut("SERVER_INFO").unwrap();
+    populate_server_info_map(server_info_map, &network_interfaces, num_servers)?;
+    let writer_info_map = ebpf.map_mut("WRITER_INFO").unwrap();
+    populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

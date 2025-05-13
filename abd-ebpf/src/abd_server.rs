@@ -1,23 +1,34 @@
 #![no_std]
 #![no_main]
 
-mod helpers;
-use abd_common::{AbdMsgType, ArchivedAbdMsg};
+use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg};
+use abd_ebpf::helpers::{
+    parse_abd_packet, set_eth_dst_mac, swap_ipv4_addresses, swap_src_dst_mac, swap_udp_ports,
+};
 use aya_ebpf::{
-    bindings,
-    helpers::r#gen::{bpf_fib_lookup, bpf_redirect},
+    bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT},
+    helpers::gen::bpf_redirect,
     macros::{map, xdp},
     maps::{Array, HashMap},
     programs::XdpContext,
-    EbpfContext,
 };
 use aya_log_ebpf::{debug, error, info, warn};
 use rkyv::{munge::munge, seal::Seal};
 
-const AF_INET: u8 = 2;
+#[no_mangle]
+static MAX_SERVERS: u32 = 16;
+
+#[no_mangle]
+static NUM_SERVERS: u32 = MAX_SERVERS;
 
 #[no_mangle]
 static SERVER_ID: u8 = 0;
+
+#[map]
+static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
+
+#[map]
+static SERVER_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
 
 #[map]
 static TAG: Array<u32> = Array::<u32>::with_max_entries(1, 0);
@@ -32,7 +43,7 @@ static COUNTERS: HashMap<u8, u32> = HashMap::<u8, u32>::with_max_entries(256, 0)
 pub fn abd_server(ctx: XdpContext) -> u32 {
     match try_abd_server(ctx) {
         Ok(ret) => ret,
-        Err(_) => bindings::xdp_action::XDP_ABORTED,
+        Err(_) => XDP_ABORTED,
     }
 }
 
@@ -43,127 +54,72 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
         return Err(());
     }
 
-    let pkt = match helpers::parse_abd_packet(&ctx) {
+    let pkt = match parse_abd_packet(&ctx) {
         Ok(p) => p,
-        Err(_) => return Ok(bindings::xdp_action::XDP_PASS),
+        Err(_) => return Ok(XDP_PASS),
     };
 
-    match pkt.msg.type_.try_into() {
-        Ok(AbdMsgType::Read) => {
-            if handle_read(&ctx, pkt.msg, server_id).is_err() {
-                return Ok(bindings::xdp_action::XDP_DROP);
-            }
-        }
-        Ok(AbdMsgType::Write) => {
-            if handle_write(&ctx, pkt.msg, server_id).is_err() {
-                return Ok(bindings::xdp_action::XDP_DROP);
-            }
-        }
-        Ok(AbdMsgType::ReadAck) => {
+    let (return_mac, return_ifindex) = match pkt.msg.type_.try_into()? {
+        AbdMsgType::Read => handle_read(&ctx, pkt.msg, server_id)?,
+        AbdMsgType::Write => handle_write(&ctx, pkt.msg, server_id)?,
+        _ => {
             warn!(
                 &ctx,
-                "Server {}: Received unexpected R-ACK from sender {}, dropping...",
+                "Server {}: Received unexpected message type {} from sender {}, dropping...",
                 server_id,
+                pkt.msg.type_,
                 pkt.msg.sender
             );
-            return Ok(bindings::xdp_action::XDP_DROP);
+            return Ok(XDP_DROP);
         }
-        Ok(AbdMsgType::WriteAck) => {
-            warn!(
-                &ctx,
-                "Server {}: Received unexpected W-ACK from sender {}, dropping...",
-                server_id,
-                pkt.msg.sender
-            );
-            return Ok(bindings::xdp_action::XDP_DROP);
-        }
-        _ => return Ok(bindings::xdp_action::XDP_PASS),
-    }
-
-    helpers::swap_src_dst_udp(pkt.udph);
-    helpers::swap_src_dst_ipv4(pkt.iph);
-
-    // Params: https://github.com/torvalds/linux/blob/7deea5634a67700d04c2a0e6d2ffa0e2956fe8ad/include/uapi/linux/bpf.h#L7207
-    // Endiannesss: bpf_ntohs() -> from_be() and bpf_htons() -> to_be()
-    let mut fib_params = bindings::bpf_fib_lookup {
-        family: AF_INET,
-        l4_protocol: (*pkt.iph).proto as u8,
-        sport: (*pkt.udph).source.to_be(),
-        dport: (*pkt.udph).dest.to_be(),
-        __bindgen_anon_1: bindings::bpf_fib_lookup__bindgen_ty_1 {
-            tot_len: u16::from_be((*pkt.iph).tot_len),
-        },
-        __bindgen_anon_2: bindings::bpf_fib_lookup__bindgen_ty_2 {
-            tos: (*pkt.iph).tos,
-        },
-        ifindex: unsafe { (*ctx.ctx).ingress_ifindex },
-        __bindgen_anon_3: bindings::bpf_fib_lookup__bindgen_ty_3 {
-            ipv4_src: (*pkt.iph).src_addr,
-        },
-        __bindgen_anon_4: bindings::bpf_fib_lookup__bindgen_ty_4 {
-            ipv4_dst: (*pkt.iph).dst_addr,
-        },
-        __bindgen_anon_5: bindings::bpf_fib_lookup__bindgen_ty_5 { tbid: 0 }, // unused
-
-        // outputs
-        smac: [0; 6],
-        dmac: [0; 6],
     };
-
-    let ret = unsafe {
-        bpf_fib_lookup(
-            ctx.as_ptr(),
-            &mut fib_params,
-            size_of::<bindings::bpf_fib_lookup>() as i32,
-            0,
-        )
-    };
-
-    // TODO: Handle all possible return values of bpf_fib_lookup
-    if ret != 0 {
-        warn!(
-            &ctx,
-            "Server {}: bpf_fib_lookup failed with error code: {}", server_id, ret
-        );
-        return Ok(bindings::xdp_action::XDP_DROP);
-    }
 
     debug!(
         &ctx,
-        "Server {}: bpf_fib_lookup returned: {}, ifindex: {}, smac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}, dmac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
+        "Server {}: Redirecting to ifindex {}, MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
         server_id,
-        ret,
-        fib_params.ifindex,
-        fib_params.smac[0],
-        fib_params.smac[1],
-        fib_params.smac[2],
-        fib_params.smac[3],
-        fib_params.smac[4],
-        fib_params.smac[5],
-        fib_params.dmac[0],
-        fib_params.dmac[1],
-        fib_params.dmac[2],
-        fib_params.dmac[3],
-        fib_params.dmac[4],
-        fib_params.dmac[5]
+        return_ifindex,
+        return_mac[0],
+        return_mac[1],
+        return_mac[2],
+        return_mac[3],
+        return_mac[4],
+        return_mac[5]
     );
 
-    // Disable UDP checksum
-    (*pkt.udph).check = 0;
+    // Swap UDP Ports and disable checksum
+    swap_udp_ports(pkt.udph);
+    (*pkt.udph).check = 0; // TODO: Use bpf_l4_csum_replace() instead
 
-    // Set the source and destination MAC addresses to the ones returned by bpf_fib_lookup
-    helpers::overwrite_src_mac(pkt.eth, &fib_params.smac);
-    helpers::overwrite_dst_mac(pkt.eth, &fib_params.dmac);
+    // Flip IPs
+    swap_ipv4_addresses(pkt.iph);
 
-    // Redirect packet to the interface returned by bpf_fib_lookup
-    let ret = unsafe { bpf_redirect(fib_params.ifindex, 0) };
-    Ok(ret as u32)
+    // Swap Ethernet src/dst and set dst→writer
+    swap_src_dst_mac(pkt.eth);
+    set_eth_dst_mac(pkt.eth, &return_mac);
+
+    // Send response
+    let ret = unsafe { bpf_redirect(return_ifindex, 0) } as u32;
+    if ret != XDP_REDIRECT {
+        error!(&ctx, "Failed to redirect to if{}, ret={}", return_ifindex, ret);
+        return Ok(XDP_ABORTED);
+    }
+    info!(
+        &ctx,
+        "Responding on if{}", return_ifindex
+    );
+    return Ok(ret);
 }
 
 /// Handle a read request
 /// Pre: magic number is correct, type is READ
+/// Returns the MAC and ifindex of the response recipient
 #[inline(always)]
-fn handle_read(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>, server_id: u8) -> Result<(), ()> {
+fn handle_read(
+    ctx: &XdpContext,
+    abd_msg: Seal<ArchivedAbdMsg>,
+    server_id: u8,
+) -> Result<([u8; 6], u32), ()> {
     munge!(let ArchivedAbdMsg { _magic, mut sender, mut type_, mut tag, mut value, counter } = abd_msg);
 
     info!(
@@ -176,7 +132,7 @@ fn handle_read(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>, server_id: u8) -
     if counter <= *counter_for_sender {
         info!(
             ctx,
-            "Server {}: Dropping READ request from sender: {} due to counter (must be > {})",
+            "Server {}: Dropping READ request from sender {} due to counter (must be > {})",
             server_id,
             *sender,
             *counter_for_sender
@@ -186,18 +142,25 @@ fn handle_read(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>, server_id: u8) -
 
     let _ = COUNTERS.insert(&sender, &counter, 0);
 
+    let (return_mac, return_ifindex) = get_response_info(ctx, *sender)?;
+
     unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
     *type_ = AbdMsgType::ReadAck as u8;
     *tag = (*TAG.get(0).unwrap_or(&0)).into();
     *value = (*VALUE.get(0).unwrap_or(&0)).into();
 
-    Ok(())
+    Ok((return_mac, return_ifindex))
 }
 
 /// Handle a write request
 /// Pre: magic number is correct, type is WRITE
+/// Returns the MAC and ifindex of the response recipient
 #[inline(always)]
-fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>, server_id: u8) -> Result<(), ()> {
+fn handle_write(
+    ctx: &XdpContext,
+    abd_msg: Seal<ArchivedAbdMsg>,
+    server_id: u8,
+) -> Result<([u8; 6], u32), ()> {
     munge!(let ArchivedAbdMsg { _magic, mut sender, mut type_, tag, value, counter } = abd_msg);
 
     info!(
@@ -240,10 +203,54 @@ fn handle_write(ctx: &XdpContext, abd_msg: Seal<ArchivedAbdMsg>, server_id: u8) 
         *value_ptr = (*value).into();
     }
 
+    let (return_mac, return_ifindex) = get_response_info(ctx, *sender)?;
+
     unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
     *type_ = AbdMsgType::WriteAck as u8;
 
-    Ok(())
+    Ok((return_mac, return_ifindex))
+}
+
+#[inline(always)]
+fn get_response_info(ctx: &XdpContext, sender_id: u8) -> Result<([u8; 6], u32), ()> {
+    // sender id: 0 = writer, >0 = server
+    let return_mac: [u8; 6];
+    let return_ifindex: u32;
+    if sender_id == 0 {
+        // Get the writer info from the map
+        let writer_info = match WRITER_INFO.get(0) {
+            Some(info) => {
+                if info.ipv4.is_unspecified() || info.ifindex == 0 || info.mac == [0; 6] {
+                    error!(ctx, "Missing writer info");
+                    return Err(());
+                }
+                *info
+            }
+            None => {
+                error!(ctx, "Failed to get writer info");
+                return Err(());
+            }
+        };
+        return_mac = writer_info.mac;
+        return_ifindex = writer_info.ifindex;
+    } else {
+        let server_info = match SERVER_INFO.get((sender_id - 1) as u32) {
+            Some(info) => {
+                if info.ipv4.is_unspecified() || info.ifindex == 0 || info.mac == [0; 6] {
+                    error!(ctx, "Missing info for server {}", sender_id);
+                    return Err(());
+                }
+                *info
+            }
+            None => {
+                error!(ctx, "Failed to get info for server {}", sender_id);
+                return Err(());
+            }
+        };
+        return_mac = server_info.mac;
+        return_ifindex = server_info.ifindex;
+    }
+    Ok((return_mac, return_ifindex))
 }
 
 #[cfg(not(test))]
