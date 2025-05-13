@@ -87,6 +87,6 @@ writer_ip=$(
 )
 writer_sender_id=0
 logrun "client" "${TESTENV[@]}" exec -n writer -- bash -c "
-  target/release/abd-client $writer_ip $writer_sender_id write 1 42 1 &&
-  target/release/abd-client $writer_ip $writer_sender_id read 2
+  target/release/abd-client $writer_ip $writer_sender_id write 1 42 1
 "
+# && target/release/abd-client $writer_ip $writer_sender_id read 2

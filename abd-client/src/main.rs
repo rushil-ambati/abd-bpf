@@ -4,6 +4,11 @@ use std::convert::TryInto;
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 
+// TODO:
+// - remove tag and counter from options for write
+// - remove sender ID
+// - log when we receive acks, with relevant values
+
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 4 {
@@ -86,7 +91,7 @@ fn main() {
         deserialize::<AbdMsg, Error>(archived).expect("Failed to deserialize ABD message");
 
     match resp.type_.try_into() {
-        Ok(AbdMsgType::WriteAck) => println!("Received W-ACK from server {}", resp.sender),
+        Ok(AbdMsgType::WriteAck) => println!("Received W-ACK from writer"),
         Ok(AbdMsgType::ReadAck) => println!(
             "Received R-ACK from server {}: tag={}, value={}",
             resp.sender, resp.tag, resp.value

@@ -1,9 +1,12 @@
 #![no_std]
 #![no_main]
 
+use core::net::Ipv4Addr;
+
 use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg};
 use abd_ebpf::helpers::{
-    parse_abd_packet, set_eth_dst_mac, swap_ipv4_addresses, swap_src_dst_mac, swap_udp_ports,
+    parse_abd_packet, set_eth_dst_mac_unchecked, swap_ipv4_addresses_unchecked,
+    swap_src_dst_mac_unchecked, swap_udp_ports_unchecked,
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT},
@@ -12,7 +15,7 @@ use aya_ebpf::{
     maps::{Array, HashMap},
     programs::XdpContext,
 };
-use aya_log_ebpf::{debug, error, info, warn};
+use aya_log_ebpf::{error, info, warn};
 use rkyv::{munge::munge, seal::Seal};
 
 #[no_mangle]
@@ -31,13 +34,13 @@ static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
 static SERVER_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
 
 #[map]
-static TAG: Array<u32> = Array::<u32>::with_max_entries(1, 0);
+static TAG: Array<u64> = Array::<u64>::with_max_entries(1, 0);
 
 #[map]
-static VALUE: Array<u32> = Array::<u32>::with_max_entries(1, 0);
+static VALUE: Array<u64> = Array::<u64>::with_max_entries(1, 0);
 
 #[map]
-static COUNTERS: HashMap<u8, u32> = HashMap::<u8, u32>::with_max_entries(256, 0);
+static COUNTERS: HashMap<u8, u64> = HashMap::<u8, u64>::with_max_entries(MAX_SERVERS, 0);
 
 #[xdp]
 pub fn abd_server(ctx: XdpContext) -> u32 {
@@ -74,39 +77,35 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
         }
     };
 
-    debug!(
-        &ctx,
-        "Server {}: Redirecting to ifindex {}, MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-        server_id,
-        return_ifindex,
-        return_mac[0],
-        return_mac[1],
-        return_mac[2],
-        return_mac[3],
-        return_mac[4],
-        return_mac[5]
-    );
-
     // Swap UDP Ports and disable checksum
-    swap_udp_ports(pkt.udph);
-    (*pkt.udph).check = 0; // TODO: Use bpf_l4_csum_replace() instead
+    swap_udp_ports_unchecked(pkt.udph);
+    (*pkt.udph).check = 0; // TODO: recompute checksum
 
     // Flip IPs
-    swap_ipv4_addresses(pkt.iph);
+    swap_ipv4_addresses_unchecked(pkt.iph);
 
     // Swap Ethernet src/dst and set dst→writer
-    swap_src_dst_mac(pkt.eth);
-    set_eth_dst_mac(pkt.eth, &return_mac);
+    swap_src_dst_mac_unchecked(pkt.eth);
+    set_eth_dst_mac_unchecked(pkt.eth, &return_mac);
 
     // Send response
     let ret = unsafe { bpf_redirect(return_ifindex, 0) } as u32;
     if ret != XDP_REDIRECT {
-        error!(&ctx, "Failed to redirect to if{}, ret={}", return_ifindex, ret);
+        error!(
+            &ctx,
+            "Failed to redirect to if{}, ret={}", return_ifindex, ret
+        );
         return Ok(XDP_ABORTED);
     }
+
+    let dst_addr = Ipv4Addr::from(u32::from_be((*pkt.iph).dst_addr));
     info!(
         &ctx,
-        "Responding on if{}", return_ifindex
+        "Server {}: Responding on if{}, {}:{}",
+        server_id,
+        return_ifindex,
+        dst_addr,
+        u16::from_be((*pkt.udph).dest)
     );
     return Ok(ret);
 }
@@ -120,7 +119,7 @@ fn handle_read(
     abd_msg: Seal<ArchivedAbdMsg>,
     server_id: u8,
 ) -> Result<([u8; 6], u32), ()> {
-    munge!(let ArchivedAbdMsg { _magic, mut sender, mut type_, mut tag, mut value, counter } = abd_msg);
+    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, counter, .. } = abd_msg);
 
     info!(
         ctx,
@@ -161,7 +160,7 @@ fn handle_write(
     abd_msg: Seal<ArchivedAbdMsg>,
     server_id: u8,
 ) -> Result<([u8; 6], u32), ()> {
-    munge!(let ArchivedAbdMsg { _magic, mut sender, mut type_, tag, value, counter } = abd_msg);
+    munge!(let ArchivedAbdMsg { mut sender, mut type_, tag, value, counter, .. } = abd_msg);
 
     info!(
         ctx,

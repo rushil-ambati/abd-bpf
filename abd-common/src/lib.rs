@@ -37,13 +37,13 @@ pub struct AbdMsg {
     pub _magic: u32,
     pub sender: u8,
     pub type_: u8,
-    pub tag: u32,
-    pub value: u32,
-    pub counter: u32,
+    pub tag: u64,
+    pub value: u64,
+    pub counter: u64,
 }
 
 impl AbdMsg {
-    pub fn new(sender: u8, ty: AbdMsgType, tag: u32, value: u32, counter: u32) -> Self {
+    pub fn new(sender: u8, ty: AbdMsgType, tag: u64, value: u64, counter: u64) -> Self {
         Self {
             _magic: ABD_MAGIC,
             sender,
@@ -62,6 +62,16 @@ pub struct AbdActorInfo {
     pub ifindex: u32,
     pub mac: [u8; 6],
 }
-
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for AbdActorInfo {}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ClientInfo {
+    pub ipv4: Ipv4Addr,
+    pub ifindex: u32,
+    pub port: u16,
+    pub mac: [u8; 6],
+}
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for ClientInfo {}
