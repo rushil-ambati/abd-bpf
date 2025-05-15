@@ -3,14 +3,15 @@
 
 use core::net::Ipv4Addr;
 
-use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo};
+use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_UDP_PORT};
 use abd_ebpf::helpers::{
-    disable_udp_csum, parse_abd_packet, set_dst_udp_port, set_eth_dst_mac, set_eth_src_mac,
-    set_ipv4_ip_dst, set_ipv4_ip_src, set_src_udp_port, AbdPacket,
+    common::{parse_abd_packet, AbdPacket},
+    offsets::{ETH_DST_OFF, ETH_SRC_OFF, UDP_CSUM_OFF},
+    tc::{set_ipv4_dst_addr, set_ipv4_src_addr, set_udp_dst_port, set_udp_src_port, store},
 };
 use aya_ebpf::{
     bindings::{TC_ACT_PIPE, TC_ACT_REDIRECT, TC_ACT_SHOT, TC_ACT_STOLEN},
-    helpers::r#gen::{bpf_clone_redirect, bpf_redirect},
+    helpers::r#gen::bpf_redirect,
     macros::{classifier, map},
     maps::{Array, HashMap},
     programs::TcContext,
@@ -53,9 +54,7 @@ static WRITE_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static ACK_COUNT: HashMap<u32, u32> = HashMap::with_max_entries(1, 0);
 
-// ---------------------------------------------------------
-//  Entry-point
-// ---------------------------------------------------------
+// TODO: investigate using proper errors rather than logging in-place and returning unit errors
 
 #[classifier]
 pub fn abd_writer(ctx: TcContext) -> i32 {
@@ -72,103 +71,8 @@ fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
     };
 
     match pkt.msg.type_.try_into()? {
-        AbdMsgType::Write => {
-            info!(
-                &ctx,
-                "Received WRITE request from client (value={})",
-                pkt.msg.value.to_native()
-            );
-
-            let zero = 0u32;
-
-            // busy?
-            let busy = unsafe { WRITING_FLAG.get(&zero) }.map_or(0, |v| *v);
-            if busy != 0 {
-                warn!(&ctx, "Writer busy – drop WRITE");
-                return Ok(TC_ACT_SHOT);
-            }
-
-            // mark busy
-            WRITING_FLAG.insert(&zero, &1u8, 0).map_err(|_| ())?;
-
-            // bump tag & counter
-            let tag = unsafe { TAG.get(&zero) }.unwrap_or(&0).wrapping_add(1);
-            let wc = unsafe { WRITE_COUNTER.get(&zero) }
-                .unwrap_or(&0)
-                .wrapping_add(1);
-            TAG.insert(&zero, &tag, 0).ok();
-            WRITE_COUNTER.insert(&zero, &wc, 0).ok();
-
-            // reset ACK count
-            ACK_COUNT.insert(&zero, &zero, 0).map_err(|_| ())?;
-
-            // record client info
-            let client = ClientInfo {
-                ipv4: Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
-                ifindex: (unsafe { *ctx.skb.skb }).ingress_ifindex,
-                port: u16::from_be(pkt.udph.source),
-                mac: pkt.eth.src_addr,
-            };
-            CLIENT_INFO.insert(&zero, &client, 0).ok();
-
-            broadcast(&ctx, pkt, tag, wc)?;
-            Ok(TC_ACT_STOLEN)
-        }
-        AbdMsgType::WriteAck => {
-            info!(
-                &ctx,
-                "Received W-ACK from server {} (tag={}, value={}, counter={})",
-                pkt.msg.sender,
-                pkt.msg.tag.to_native(),
-                pkt.msg.value.to_native(),
-                pkt.msg.counter.to_native()
-            );
-
-            let zero = 0u32;
-
-            // if there's no write in progress, ignore the ACK
-            let busy = unsafe { WRITING_FLAG.get(&zero) }.map_or(0, |v| *v);
-            if busy == 0 {
-                info!(
-                    &ctx,
-                    "No write in progress – drop W-ACK from server {}", pkt.msg.sender
-                );
-                return Ok(TC_ACT_SHOT);
-            }
-
-            // check if the ACK is for the current write
-            let current_wc = unsafe { WRITE_COUNTER.get(&zero) }.unwrap_or(&0);
-            if pkt.msg.counter.to_native() != *current_wc {
-                warn!(
-                    &ctx,
-                    "W-ACK counter mismatch (expected {}, got {})",
-                    *current_wc,
-                    pkt.msg.counter.to_native()
-                );
-                return Ok(TC_ACT_SHOT);
-            }
-
-            // increment ACK counter
-            let old_ack_cnt = unsafe { ACK_COUNT.get(&zero) }.unwrap_or(&0);
-            let new_ack_cnt = old_ack_cnt.wrapping_add(1);
-            ACK_COUNT.insert(&zero, &new_ack_cnt, 0).map_err(|_| ())?;
-
-            // check if we have enough ACKs
-            let majority = ((unsafe { core::ptr::read_volatile(&NUM_SERVERS) }) >> 1) + 1;
-            if new_ack_cnt >= majority {
-                WRITING_FLAG.remove(&zero).ok(); // clear busy flag
-                info!(&ctx, "WRITE committed – {} ACKs", new_ack_cnt);
-
-                // send ACK to the client
-                Ok(send_write_ack(&ctx, pkt)?)
-            } else {
-                info!(
-                    &ctx,
-                    "Got {} W-ACK(s), waiting for majority ({})...", new_ack_cnt, majority
-                );
-                Ok(TC_ACT_SHOT)
-            }
-        }
+        AbdMsgType::Write => handle_write(&ctx, pkt),
+        AbdMsgType::WriteAck => handle_write_ack(&ctx, pkt),
         _ => {
             warn!(
                 &ctx,
@@ -176,54 +80,173 @@ fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
                 pkt.msg.type_,
                 pkt.msg.sender
             );
-            return Ok(TC_ACT_SHOT);
+            Ok(TC_ACT_SHOT)
         }
     }
 }
 
-/// Clone & redirect the packet to each server interface
-#[inline(always)]
-fn broadcast(ctx: &TcContext, pkt: AbdPacket<'_>, new_tag: u64, new_wc: u64) -> Result<(), ()> {
+/// Handle a write request
+/// Pre: magic number is correct, type is WRITE
+fn handle_write(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
+    munge!(let ArchivedAbdMsg { mut sender, mut tag, value, mut counter, .. } = pkt.msg);
+
+    info!(
+        ctx,
+        "Received WRITE request from client (value={})",
+        value.to_native()
+    );
+
+    let zero = 0u32;
+
+    // busy?
+    let busy = unsafe { WRITING_FLAG.get(&zero) }.map_or(0, |v| *v);
+    if busy != 0 {
+        warn!(ctx, "Writer busy – drop WRITE");
+        return Ok(TC_ACT_SHOT);
+    }
+
+    // mark busy
+    WRITING_FLAG.insert(&zero, &1u8, 0).map_err(|_| {
+        error!(ctx, "Failed to set busy flag");
+    })?;
+
+    // bump tag & counter
+    let new_tag = unsafe { TAG.get(&zero) }.unwrap_or(&0).wrapping_add(1);
+    let new_wc = unsafe { WRITE_COUNTER.get(&zero) }
+        .unwrap_or(&0)
+        .wrapping_add(1);
+    TAG.insert(&zero, &new_tag, 0).ok();
+    WRITE_COUNTER.insert(&zero, &new_wc, 0).ok();
+
+    // reset ACK count
+    ACK_COUNT.insert(&zero, &zero, 0).map_err(|_| {
+        error!(ctx, "Failed to reset ACK count");
+    })?;
+
+    // record client info
+    let client = ClientInfo {
+        ipv4: Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
+        ifindex: (unsafe { *ctx.skb.skb }).ingress_ifindex,
+        port: u16::from_be(pkt.udph.source),
+        mac: pkt.eth.src_addr,
+    };
+    CLIENT_INFO.insert(&zero, &client, 0).ok();
+
     // modify ABD msg in-place
-    munge!(let ArchivedAbdMsg { mut tag, mut counter, .. } = pkt.msg);
+    *sender = 0;
     *tag = new_tag.into();
     *counter = new_wc.into();
 
-    // L4 tweaks
-    set_src_udp_port(ctx, abd_common::ABD_UDP_PORT);
-    disable_udp_csum(ctx);
+    broadcast_to_servers(ctx).inspect_err(|_| {
+        error!(ctx, "Failed to broadcast WRITE request");
+    })?;
+    Ok(TC_ACT_STOLEN)
+}
 
-    // writer IP/MAC->src
-    let writer = WRITER_INFO.get(0).ok_or(())?;
-    set_ipv4_ip_src(ctx, writer.ipv4);
-    set_eth_src_mac(ctx, &writer.mac); // TODO: is this needed?
+/// Handle a write acknowledgment
+/// Pre: magic number is correct, type is WRITE_ACK
+fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
+    info!(
+        ctx,
+        "Received W-ACK from server {} (tag={}, value={}, counter={})",
+        pkt.msg.sender,
+        pkt.msg.tag.to_native(),
+        pkt.msg.value.to_native(),
+        pkt.msg.counter.to_native()
+    );
+
+    let zero = 0u32;
+
+    // if there's no write in progress, ignore the ACK
+    let busy = unsafe { WRITING_FLAG.get(&zero) }.map_or(0, |v| *v);
+    if busy == 0 {
+        info!(
+            ctx,
+            "No write in progress – drop W-ACK from server {}", pkt.msg.sender
+        );
+        return Ok(TC_ACT_SHOT);
+    }
+
+    // check if the ACK is for the current write
+    let current_wc = unsafe { WRITE_COUNTER.get(&zero) }.unwrap_or(&0);
+    if pkt.msg.counter.to_native() != *current_wc {
+        warn!(
+            ctx,
+            "W-ACK counter mismatch (expected {}, got {})",
+            *current_wc,
+            pkt.msg.counter.to_native()
+        );
+        return Ok(TC_ACT_SHOT);
+    }
+
+    // increment ACK counter
+    let old_ack_cnt = unsafe { ACK_COUNT.get(&zero) }.unwrap_or(&0);
+    let new_ack_cnt = old_ack_cnt.wrapping_add(1);
+    ACK_COUNT.insert(&zero, &new_ack_cnt, 0).map_err(|_| {
+        error!(ctx, "Failed to increment ACK count");
+    })?;
+
+    // check if we have enough ACKs
+    let majority = ((unsafe { core::ptr::read_volatile(&NUM_SERVERS) }) >> 1) + 1;
+    if new_ack_cnt >= majority {
+        WRITING_FLAG.remove(&zero).ok(); // clear busy flag
+        info!(ctx, "WRITE committed – {} ACKs", new_ack_cnt);
+
+        // send ACK to the client
+        redirect_write_ack_to_client(&ctx, pkt).inspect_err(|_| {
+            error!(ctx, "Failed to redirect W-ACK to client");
+        })
+    } else {
+        info!(
+            ctx,
+            "Got {} W-ACK(s), waiting for majority ({})...", new_ack_cnt, majority
+        );
+        Ok(TC_ACT_SHOT)
+    }
+}
+
+/// Clone & redirect the packet to each server
+fn broadcast_to_servers(ctx: &TcContext) -> Result<(), ()> {
+    // servers must reply on our UDP port
+    set_udp_src_port(ctx, ABD_UDP_PORT).map_err(|_| {
+        error!(ctx, "Failed to update the source UDP port");
+    })?;
+
+    let writer = WRITER_INFO.get(0).ok_or_else(|| {
+        error!(ctx, "Failed to get writer info");
+    })?;
+
+    // set L3/L2 source addresses as writer
+    set_ipv4_src_addr(ctx, writer.ipv4).map_err(|_| {
+        error!(ctx, "Failed to update the source IP address");
+    })?;
+    store(ctx, ETH_SRC_OFF, &writer.mac, 0).map_err(|_| {
+        error!(ctx, "Failed to update the source MAC address");
+    })?;
 
     let num_servers = unsafe { core::ptr::read_volatile(&NUM_SERVERS) };
-    for i in 0..MAX_SERVERS {
-        // TODO: will the verifier be OK with 1..num_servers?
-        if i >= num_servers {
-            break;
-        }
+    for i in 0..num_servers {
+        let server = SERVER_INFO.get(i).ok_or_else(|| {
+            error!(ctx, "Failed to get server info for server {}", i + 1);
+        })?;
 
-        let server = SERVER_INFO.get(i).ok_or(())?;
-
-        // IP dst
-        let ret = set_ipv4_ip_dst(&ctx, server.ipv4);
-        (ret == 0).then_some(()).ok_or(())?;
-        if ret != 0 {
+        // set L3/L2 destination addresses as server
+        set_ipv4_dst_addr(ctx, server.ipv4).map_err(|_| {
             error!(ctx, "Failed to update the destination IP address");
-            return Err(());
-        }
-
-        // MAC dst
-        set_eth_dst_mac(ctx, &server.mac);
+        })?;
+        store(ctx, ETH_DST_OFF, &server.mac, 0).map_err(|_| {
+            error!(ctx, "Failed to update the destination MAC address");
+        })?;
 
         // clone+redirect
-        let ret = unsafe { bpf_clone_redirect(ctx.skb.skb, server.ifindex, 0) } as i32;
-        if ret != 0 {
-            error!(ctx, "clone_redirect→srv{} failed, ret={}", i + 1, ret);
-            return Err(());
-        }
+        ctx.clone_redirect(server.ifindex, 0).map_err(|ret| {
+            error!(
+                ctx,
+                "Failed to clone+redirect to server {}, ret={}",
+                i + 1,
+                ret
+            );
+        })?;
         info!(
             ctx,
             "clone_redirect→server{} ({}@if{})",
@@ -236,7 +259,7 @@ fn broadcast(ctx: &TcContext, pkt: AbdPacket<'_>, new_tag: u64, new_wc: u64) -> 
 }
 
 /// Send a write ACK to the client
-fn send_write_ack(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
+fn redirect_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
     let zero: u32 = 0u32;
     let client = unsafe { CLIENT_INFO.get(&zero) }.ok_or(())?;
 
@@ -245,7 +268,7 @@ fn send_write_ack(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
         "Sending W-ACK to client {}:{}@if{}", client.ipv4, client.port, client.ifindex
     );
 
-    // 1) modify ABD msg: sender=0, tag=0, counter=0
+    // clear internal message fields
     munge!(let ArchivedAbdMsg { mut sender, mut tag, mut counter, .. } = pkt.msg);
     *sender = 0;
     *tag = 0.into();
@@ -253,18 +276,37 @@ fn send_write_ack(ctx: &TcContext, pkt: AbdPacket<'_>) -> Result<i32, ()> {
 
     let writer = WRITER_INFO.get(0).ok_or(())?;
 
-    // 2) src=writer IP, dst=client IP
-    set_ipv4_ip_src(ctx, writer.ipv4);
-    set_ipv4_ip_dst(ctx, client.ipv4);
+    // L2
+    store(ctx, ETH_SRC_OFF, &writer.mac, 0).or_else(|_| {
+        error!(ctx, "Failed to update the source MAC address");
+        Err(())
+    })?;
+    store(ctx, ETH_DST_OFF, &client.mac, 0).or_else(|_| {
+        error!(ctx, "Failed to update the destination MAC address");
+        Err(())
+    })?;
 
-    // 3) update UDP ports
-    set_src_udp_port(ctx, abd_common::ABD_UDP_PORT);
-    set_dst_udp_port(ctx, client.port);
-    disable_udp_csum(ctx); // TODO: recompute checksum
+    // L3
+    set_ipv4_src_addr(ctx, writer.ipv4).map_err(|_| {
+        error!(ctx, "Failed to update the source IP address");
+    })?;
+    set_ipv4_dst_addr(ctx, client.ipv4).map_err(|_| {
+        error!(ctx, "Failed to update the destination IP address");
+    })?;
 
-    // 4) L2 MACs: dst=client MAC, src=writer MAC
-    set_eth_src_mac(ctx, &writer.mac);
-    set_eth_dst_mac(ctx, &client.mac);
+    // L4
+    set_udp_src_port(ctx, ABD_UDP_PORT).map_err(|_| {
+        error!(ctx, "Failed to update the source UDP port");
+    })?;
+    set_udp_dst_port(ctx, client.port).map_err(|_| {
+        error!(ctx, "Failed to update the destination UDP port");
+    })?;
+
+    // TODO: remove once the server correctly sets the checksum
+    store(ctx, UDP_CSUM_OFF, &0u16, 0).or_else(|_| {
+        error!(ctx, "Failed to update the UDP checksum");
+        Err(())
+    })?;
 
     debug!(
         ctx,

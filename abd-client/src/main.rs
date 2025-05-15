@@ -3,6 +3,7 @@ use rkyv::{deserialize, rancor::Error};
 use std::convert::TryInto;
 use std::env;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::time::Instant;
 
 // TODO:
 // - remove tag and counter from options for write
@@ -49,8 +50,8 @@ fn main() {
             }
             (
                 AbdMsgType::Read,
-                0, // tag not used for read
-                0, // value not used for read
+                0,
+                0,
                 args[4].parse().expect("Invalid counter"),
             )
         }
@@ -60,31 +61,29 @@ fn main() {
         }
     };
 
-    // Build the server socket address (IPv4)
     let server_addr = SocketAddrV4::new(server_ip, ABD_UDP_PORT);
-
-    // Bind a UDP socket to an ephemeral port
     let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket");
 
     println!("Sending {} request to {}", op.to_uppercase(), server_addr);
 
-    // Construct the ABD message
     let msg = AbdMsg::new(sender_id, msg_type, tag, value, counter);
-    // Serialize the message into a byte slice
     let msg_bytes = rkyv::to_bytes::<Error>(&msg).expect("Failed to serialize ABD message");
 
-    // Send the ABD message to the server
+    // Record the time just before sending
+    let start = Instant::now();
+
     socket
         .send_to(&msg_bytes, server_addr)
         .expect("Failed to send ABD request");
 
-    // Prepare a buffer for the response
     let mut buf = [0u8; 1024];
     let (amt, _) = socket
         .recv_from(&mut buf)
         .expect("Failed to receive response");
 
-    // Deserialize the received bytes as an AbdMsg
+    // Measure duration after receiving
+    let elapsed = start.elapsed();
+
     let archived = rkyv::access::<ArchivedAbdMsg, Error>(&buf[..amt])
         .expect("Failed to deserialize ABD message");
     let resp: AbdMsg =
@@ -98,4 +97,6 @@ fn main() {
         ),
         _ => println!("Operation: unknown (type {:?})", resp.type_),
     }
+
+    println!("Round-trip time: {:.3?}", elapsed);
 }

@@ -5,8 +5,11 @@ use core::net::Ipv4Addr;
 
 use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg};
 use abd_ebpf::helpers::{
-    parse_abd_packet, set_eth_dst_mac_unchecked, swap_ipv4_addresses_unchecked,
-    swap_src_dst_mac_unchecked, swap_udp_ports_unchecked,
+    common::parse_abd_packet,
+    xdp::{
+        set_eth_dst_addr, swap_ipv4_addrs, swap_eth_addrs,
+        swap_udp_ports,
+    },
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT},
@@ -33,9 +36,11 @@ static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
 #[map]
 static SERVER_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
 
+// TODO: replace with a HashMap
 #[map]
 static TAG: Array<u64> = Array::<u64>::with_max_entries(1, 0);
 
+// TODO: replace with a HashMap
 #[map]
 static VALUE: Array<u64> = Array::<u64>::with_max_entries(1, 0);
 
@@ -77,18 +82,25 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
         }
     };
 
-    // Swap UDP Ports and disable checksum
-    swap_udp_ports_unchecked(pkt.udph);
-    (*pkt.udph).check = 0; // TODO: recompute checksum
+    // TODO: move the rest of the code to a separate function
+    // TODO: generally improve error handling and clean up code
 
-    // Flip IPs
-    swap_ipv4_addresses_unchecked(pkt.iph);
+    // Swap UDP Ports and disable checksum
+    // NB: This doesn't affect the checksum
+    swap_udp_ports(pkt.udph);
+    (*pkt.udph).check = 0; // TODO: recompute checksum
+    // note: l4_csum_replace isn't available in XDP, but csum_diff is. see examples:
+    // * https://github.com/riyaolin/aya-ebpf-lb-rs/blob/55bc95f25fc2dc2680cf8add874ad32dcdd3bedd/lb/lb-ebpf/src/main.rs#L133
+    // * https://github.com/loheagn/folonet/blob/fbdf1d8a939e6dd74391fb3a9a61053dd736cdfb/folonet-ebpf/src/main.rs#L117
+
+    // Flip IPs. Note this doesn't affect either UDP or IPv4 checksums
+    swap_ipv4_addrs(pkt.iph);
 
     // Swap Ethernet src/dst and set dst→writer
-    swap_src_dst_mac_unchecked(pkt.eth);
-    set_eth_dst_mac_unchecked(pkt.eth, &return_mac);
+    swap_eth_addrs(pkt.eth);
+    set_eth_dst_addr(pkt.eth, &return_mac);
 
-    // Send response
+    // Send response to writer
     let ret = unsafe { bpf_redirect(return_ifindex, 0) } as u32;
     if ret != XDP_REDIRECT {
         error!(
@@ -113,7 +125,6 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
 /// Handle a read request
 /// Pre: magic number is correct, type is READ
 /// Returns the MAC and ifindex of the response recipient
-#[inline(always)]
 fn handle_read(
     ctx: &XdpContext,
     abd_msg: Seal<ArchivedAbdMsg>,
@@ -154,7 +165,6 @@ fn handle_read(
 /// Handle a write request
 /// Pre: magic number is correct, type is WRITE
 /// Returns the MAC and ifindex of the response recipient
-#[inline(always)]
 fn handle_write(
     ctx: &XdpContext,
     abd_msg: Seal<ArchivedAbdMsg>,
@@ -210,7 +220,8 @@ fn handle_write(
     Ok((return_mac, return_ifindex))
 }
 
-#[inline(always)]
+/// Get the MAC and ifindex of the response recipient
+// TODO: refactor how this fn is called... perhaps store the sender before handling the request?
 fn get_response_info(ctx: &XdpContext, sender_id: u8) -> Result<([u8; 6], u32), ()> {
     // sender id: 0 = writer, >0 = server
     let return_mac: [u8; 6];
