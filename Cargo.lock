@@ -26,6 +26,10 @@ name = "abd-client"
 version = "0.1.0"
 dependencies = [
  "abd-common",
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
  "rkyv",
 ]
 

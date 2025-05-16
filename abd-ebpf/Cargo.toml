@@ -6,8 +6,8 @@ edition = "2021"
 [dependencies]
 abd-common = { path = "../abd-common" }
 
-aya-ebpf = { workspace = true }
-aya-log-ebpf = { workspace = true }
+aya-ebpf.workspace = true
+aya-log-ebpf.workspace = true
 
 network-types = "0.0.7"
 rkyv = { version = "0.8.10", default-features = false, features = [
@@ -15,11 +15,15 @@ rkyv = { version = "0.8.10", default-features = false, features = [
 ] }
 
 [build-dependencies]
-which = { workspace = true }
+which.workspace = true
 
 [[bin]]
 name = "abd-writer"
 path = "src/abd_writer.rs"
+
+[[bin]]
+name = "abd-reader"
+path = "src/abd_reader.rs"
 
 [[bin]]
 name = "abd-server"

@@ -1,102 +1,172 @@
+use std::{
+    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
+    time::Instant,
+};
+
 use abd_common::{AbdMsg, AbdMsgType, ArchivedAbdMsg, ABD_UDP_PORT};
-use rkyv::{deserialize, rancor::Error};
-use std::convert::TryInto;
-use std::env;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::time::Instant;
+use clap::{Args, Parser, Subcommand};
+use log::{debug, info, warn};
+use rkyv::{deserialize, rancor::Error as RkyvError};
 
-// TODO:
-// - remove tag and counter from options for write
-// - remove sender ID
-// - log when we receive acks, with relevant values
+/// Simple command-line ABD client.
+#[derive(Parser, Debug)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 4 {
-        eprintln!(
-            "Usage: {} <server_ipv4> <sender_id> <write|read> [tag value counter]",
-            args[0]
-        );
-        std::process::exit(1);
-    }
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Send a WRITE request
+    Write(WriteOpts),
 
-    let server_ip: Ipv4Addr = args[1].parse().expect("Invalid IPv4 address provided");
-    let sender_id: u8 = args[2].parse().expect("Invalid sender ID");
-    let op = args[3].to_lowercase();
+    /// Send a READ request
+    Read(ReadOpts),
+}
 
-    let (msg_type, tag, value, counter) = match op.as_str() {
-        "write" => {
-            if args.len() < 7 {
-                eprintln!(
-                    "Usage for write: {} <server_ipv4> <sender_id> write <tag> <value> <counter>",
-                    args[0]
-                );
-                std::process::exit(1);
+#[derive(Args, Debug)]
+struct CommonOpts {
+    /// IPv4 address of the target server
+    #[arg()]
+    server: Ipv4Addr,
+
+    /// Sender ID (0 = writer)
+    #[arg(short = 's', long)]
+    sender_id: Option<u32>,
+
+    /// Monotonic counter
+    #[arg(short = 'c', long)]
+    counter: Option<u64>,
+
+    /// Tag value
+    #[arg(short = 't', long)]
+    tag: Option<u64>,
+}
+
+#[derive(Args, Debug)]
+struct WriteOpts {
+    #[clap(flatten)]
+    common: CommonOpts,
+
+    /// Value to write (required positional argument)
+    #[arg()]
+    value: u64,
+}
+
+#[derive(Args, Debug)]
+struct ReadOpts {
+    #[clap(flatten)]
+    common: CommonOpts,
+
+    /// Optional value (visible if explicitly passed)
+    #[arg(short = 'v', long)]
+    value: Option<u64>,
+}
+
+fn main() -> anyhow::Result<()> {
+    env_logger::init();
+    let cli = Cli::parse();
+    debug!("Parsed arguments: {cli:?}");
+
+    let (server_addr, msg, label) = match cli.command {
+        Command::Write(opts) => {
+            let server = opts.common.server;
+            let sender_id = opts.common.sender_id.unwrap_or(0);
+            let counter = opts.common.counter.unwrap_or(0);
+            let tag = opts.common.tag.unwrap_or(0);
+
+            let msg = AbdMsg::new(sender_id, AbdMsgType::Write, tag, opts.value, counter);
+            let mut label = format!("Write({})", opts.value);
+
+            if opts.common.tag.is_some() {
+                label.push_str(&format!(" tag={tag}"));
             }
-            (
-                AbdMsgType::Write,
-                args[4].parse().expect("Invalid tag"),
-                args[5].parse().expect("Invalid value"),
-                args[6].parse().expect("Invalid counter"),
-            )
-        }
-        "read" => {
-            if args.len() < 5 {
-                eprintln!(
-                    "Usage for read: {} <server_ipv4> <sender_id> read <counter>",
-                    args[0]
-                );
-                std::process::exit(1);
+            if opts.common.counter.is_some() {
+                label.push_str(&format!(" counter={counter}"));
             }
-            (
-                AbdMsgType::Read,
-                0,
-                0,
-                args[4].parse().expect("Invalid counter"),
-            )
+            if opts.common.sender_id.is_some() {
+                label.push_str(&format!(" sender={sender_id}"));
+            }
+
+            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
         }
-        _ => {
-            eprintln!("Invalid operation: use 'write' or 'read'");
-            std::process::exit(1);
+
+        Command::Read(opts) => {
+            let server = opts.common.server;
+            let sender_id = opts.common.sender_id.unwrap_or(0);
+            let counter = opts.common.counter.unwrap_or(0);
+            let tag = opts.common.tag.unwrap_or(0);
+            let value = opts.value.unwrap_or(0); // not required for read, but preserved
+
+            let msg = AbdMsg::new(sender_id, AbdMsgType::Read, tag, value, counter);
+            let mut label = "Read".to_string();
+
+            if opts.common.tag.is_some() {
+                label.push_str(&format!(" tag={tag}"));
+            }
+            if opts.common.counter.is_some() {
+                label.push_str(&format!(" counter={counter}"));
+            }
+            if opts.common.sender_id.is_some() {
+                label.push_str(&format!(" sender={sender_id}"));
+            }
+            if opts.value.is_some() {
+                label.push_str(&format!(" value={value}"));
+            }
+
+            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
         }
     };
 
-    let server_addr = SocketAddrV4::new(server_ip, ABD_UDP_PORT);
-    let socket = UdpSocket::bind("0.0.0.0:0").expect("Failed to bind UDP socket");
+    let payload = rkyv::to_bytes::<RkyvError>(&msg)
+        .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
-    println!("Sending {} request to {}", op.to_uppercase(), server_addr);
+    let sock = UdpSocket::bind("0.0.0.0:0")?;
+    info!("🚀  {label} → {}", server_addr.ip());
 
-    let msg = AbdMsg::new(sender_id, msg_type, tag, value, counter);
-    let msg_bytes = rkyv::to_bytes::<Error>(&msg).expect("Failed to serialize ABD message");
-
-    // Record the time just before sending
     let start = Instant::now();
-
-    socket
-        .send_to(&msg_bytes, server_addr)
-        .expect("Failed to send ABD request");
+    sock.send_to(&payload, server_addr)?;
+    debug!("↗ Sent {} bytes", payload.len());
 
     let mut buf = [0u8; 1024];
-    let (amt, _) = socket
-        .recv_from(&mut buf)
-        .expect("Failed to receive response");
+    let (n, from) = sock.recv_from(&mut buf)?;
+    let rtt = start.elapsed();
+    debug!("↙  response ({n} bytes) from {from} — RTT {rtt:?}");
 
-    // Measure duration after receiving
-    let elapsed = start.elapsed();
+    let archived = rkyv::access::<ArchivedAbdMsg, RkyvError>(&buf[..n])
+        .map_err(|e| anyhow::anyhow!("deserialise: {e}"))?;
+    let resp: AbdMsg = deserialize::<AbdMsg, RkyvError>(archived)
+        .map_err(|e| anyhow::anyhow!("deserialise (stage 2): {e}"))?;
+    debug!("Deserialised response: {resp:?}");
 
-    let archived = rkyv::access::<ArchivedAbdMsg, Error>(&buf[..amt])
-        .expect("Failed to deserialize ABD message");
-    let resp: AbdMsg =
-        deserialize::<AbdMsg, Error>(archived).expect("Failed to deserialize ABD message");
+    report(&resp);
+    Ok(())
+}
 
+fn report(resp: &AbdMsg) {
     match resp.type_.try_into() {
-        Ok(AbdMsgType::WriteAck) => println!("Received W-ACK from writer"),
-        Ok(AbdMsgType::ReadAck) => println!(
-            "Received R-ACK from server {}: tag={}, value={}",
-            resp.sender, resp.tag, resp.value
+        Ok(msg_type @ AbdMsgType::WriteAck) => {
+            info!("✅  {msg_type:?}");
+            debug!(
+                "sender={} tag={} value={} counter={}",
+                resp.sender, resp.tag, resp.value, resp.counter
+            );
+        }
+        Ok(msg_type @ AbdMsgType::ReadAck) => {
+            info!("✅  {msg_type:?} tag={} value={}", resp.tag, resp.value);
+            debug!(
+                "sender={} tag={} value={} counter={}",
+                resp.sender, resp.tag, resp.value, resp.counter
+            );
+        }
+        Ok(other) => warn!(
+            "❌  Unexpected message type: {other:?} from @{}",
+            resp.sender
         ),
-        _ => println!("Operation: unknown (type {:?})", resp.type_),
+        Err(_) => warn!(
+            "❌  Unknown message type: {} from @{}",
+            resp.type_, resp.sender
+        ),
     }
-
-    println!("Round-trip time: {:.3?}", elapsed);
 }

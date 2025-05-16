@@ -1,4 +1,4 @@
-use abd::helpers::map_utils::{populate_server_info_map, populate_writer_info_map};
+use abd::helpers::map_utils::{populate_node_info_map, populate_writer_info_map};
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::EbpfLoader;
 use clap::Parser;
@@ -62,8 +62,8 @@ async fn main() -> anyhow::Result<()> {
     // Populate the info maps
     let network_interfaces = NetworkInterface::show().unwrap();
     let server_info_map = ebpf.map_mut("SERVER_INFO").unwrap();
-    populate_server_info_map(server_info_map, &network_interfaces, num_servers)?;
-    let writer_info_map = ebpf.map_mut("WRITER_INFO").unwrap();
+    populate_node_info_map(server_info_map, &network_interfaces, num_servers)?;
+    let writer_info_map = ebpf.map_mut("SELF_INFO").unwrap();
     populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
     info!("Waiting for Ctrl-C...");

@@ -6,7 +6,7 @@ use network_interface::NetworkInterface;
 
 use super::iface_utils::get_iface_info;
 
-pub fn populate_server_info_map(
+pub fn populate_node_info_map(
     map: &mut Map,
     interfaces: &Vec<NetworkInterface>,
     num_servers: u32,

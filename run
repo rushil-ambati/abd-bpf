@@ -4,19 +4,26 @@ set -euo pipefail
 NUM_SERVERS=3
 TESTENV=(sudo -n tools/testenv/testenv.sh)
 
-sudo -v || { echo "need sudo"; exit 1; }
-
-logrun() {
-  local label=$1
-  shift
-  stdbuf -oL "$@" 2>&1 | sed "s/^/[$label] /"
+sudo -v || {
+  echo "need sudo"
+  exit 1
 }
 
 bg_pids=()
-logrun_bg() {
-  local label=$1
+mkdir -p logs
+rm -f logs/*
+
+# Run command in background, tee its log, and stream to stdout
+run_bg() {
+  local name=$1
   shift
-  stdbuf -oL "$@" 2>&1 | tee >(sed "s/^/[$label] /") >/dev/null &
+  local logfile="logs/${name}.log"
+  : >"$logfile"
+
+  "$@" >"$logfile" 2>&1 &
+  bg_pids+=($!)
+
+  tail -F "$logfile" &
   bg_pids+=($!)
 }
 
@@ -26,7 +33,6 @@ cleanup() {
     wait "$pid" 2>/dev/null || true
   done
 }
-
 trap cleanup EXIT SIGINT SIGTERM
 
 usage() {
@@ -34,59 +40,69 @@ usage() {
   exit 1
 }
 
-# parse args
 while getopts "s:" opt; do
   case $opt in
-    s) NUM_SERVERS=$OPTARG ;;
-    *) usage ;;
+  s) NUM_SERVERS=$OPTARG ;;
+  *) usage ;;
   esac
 done
 
-export RUST_LOG=info
-
-# 1. build
+# Build everything
 cargo build --release
 
-# 2. setup testenvs
-# veth devices won't deliver redirected/retransmitted XDP frames unless an XDP program is attached to the receiving side of the target veth interface
-for i in $(seq 1 "$NUM_SERVERS"); do
-  env="server$i"
-
+# Setup testenvs
+for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
   "${TESTENV[@]}" setup --name "$env" --legacy-ip >/dev/null 2>&1 || true
 
-  logrun_bg "$env" "${TESTENV[@]}" exec -n "$env" -- \
-    bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
+  # Disable UDP TX checksum offloading
+  "${TESTENV[@]}" exec -n "$env" -- \
+    bash -c "ethtool -K veth0 tx-checksum-ip-generic off >/dev/null 2>&1 || true"
+
+  # Attach xdp-pass with warn-level logs
+  run_bg "$env-veth0" "${TESTENV[@]}" exec -n "$env" -- \
+    bash -c "RUST_LOG=warn target/release/xdp-pass --iface veth0"
 done
 
-"${TESTENV[@]}" setup --name writer --legacy-ip >/dev/null 2>&1 || true
-
-logrun_bg "writer" "${TESTENV[@]}" exec -n writer -- \
-  bash -c "RUST_LOG=info target/release/xdp-pass --iface veth0"
-
-# 3. run the servers
+# Run abd-server on each server
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
-
-  logrun_bg "$env" sudo -E target/release/abd-server \
-    --iface "$env" --num-servers="$NUM_SERVERS" --server-id "$i"
+  run_bg "$env-server" sudo -E bash -c \
+    "RUST_LOG=info target/release/abd-server \
+     --iface $env --num-servers=$NUM_SERVERS --server-id $i"
 done
 
-# 4. run the writer
-logrun_bg "writer" sudo -E target/release/abd-writer \
-  --iface writer --num-servers="$NUM_SERVERS" \
+# Run abd-writer with info logging
+run_bg "writer" sudo -E bash -c \
+  "RUST_LOG=info target/release/abd-writer \
+   --iface writer --num-servers=$NUM_SERVERS"
 
-# 4. wait a moment
+# Run abd-reader on server1
+run_bg "reader1" sudo -E bash -c \
+  "RUST_LOG=info target/release/abd-reader \
+   --iface server1 --num-servers=$NUM_SERVERS --node-id 1"
+
+# Wait for services to initialize
 sleep 1
 
-# 5. run the client
-echo
+# Write
 writer_ip=$(
-  "${TESTENV[@]}" -n writer status \
-    | awk '/Iface:/ {print $4}' \
-    | cut -d'/' -f1
+  "${TESTENV[@]}" -n writer status |
+    awk '/Iface:/ {print $4}' |
+    cut -d'/' -f1
 )
-writer_sender_id=0
-logrun "client" "${TESTENV[@]}" exec -n writer -- bash -c "
-  target/release/abd-client $writer_ip $writer_sender_id write 1 42 1
-"
-# && target/release/abd-client $writer_ip $writer_sender_id read 2
+run_bg "client_write" "${TESTENV[@]}" exec -n writer -- bash -c "
+  RUST_LOG=info target/release/abd-client write $writer_ip 42"
+
+sleep 1
+
+# Read
+reader1_ip=$(
+  "${TESTENV[@]}" -n server1 status |
+    awk '/Iface:/ {print $4}' |
+    cut -d'/' -f1
+)
+run_bg "client_read" "${TESTENV[@]}" exec -n server1 -- bash -c "
+  RUST_LOG=info target/release/abd-client read $reader1_ip"
+
+# Wait for all tasks
+wait

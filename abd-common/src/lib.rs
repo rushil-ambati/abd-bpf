@@ -2,11 +2,13 @@
 
 use core::net::Ipv4Addr;
 
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
 
 pub const ABD_SERVER_IFACE_PREFIX: &str = "server";
 pub const ABD_WRITER_IFACE_NAME: &str = "writer";
-pub const ABD_UDP_PORT: u16 = 4242; // UDP port used for ABD messages
+pub const ABD_WRITER_ID: u32 = 0;
+pub const ABD_UDP_PORT: u16 = 4242;
+pub const ABD_SERVER_UDP_PORT: u16 = 4243;
 pub const ABD_MAGIC: u32 = 0xdeadbeef;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -17,17 +19,43 @@ pub enum AbdMsgType {
     WriteAck,
 }
 
-impl TryFrom<u8> for AbdMsgType {
+impl AbdMsgType {
+    fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            x if x == AbdMsgType::Read as u32 => Some(Self::Read),
+            x if x == AbdMsgType::Write as u32 => Some(Self::Write),
+            x if x == AbdMsgType::ReadAck as u32 => Some(Self::ReadAck),
+            x if x == AbdMsgType::WriteAck as u32 => Some(Self::WriteAck),
+            _ => None,
+        }
+    }
+}
+
+impl From<AbdMsgType> for u32 {
+    fn from(val: AbdMsgType) -> Self {
+        val as u32
+    }
+}
+
+impl From<AbdMsgType> for u32_le {
+    fn from(val: AbdMsgType) -> Self {
+        (val as u32).into()
+    }
+}
+
+impl TryFrom<u32> for AbdMsgType {
     type Error = ();
 
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            x if x == AbdMsgType::Read as u8 => Ok(Self::Read),
-            x if x == AbdMsgType::Write as u8 => Ok(Self::Write),
-            x if x == AbdMsgType::ReadAck as u8 => Ok(Self::ReadAck),
-            x if x == AbdMsgType::WriteAck as u8 => Ok(Self::WriteAck),
-            _ => Err(()),
-        }
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        AbdMsgType::from_u32(value).ok_or(())
+    }
+}
+
+impl TryFrom<u32_le> for AbdMsgType {
+    type Error = ();
+
+    fn try_from(value: u32_le) -> Result<Self, Self::Error> {
+        AbdMsgType::from_u32(value.into()).ok_or(())
     }
 }
 
@@ -35,19 +63,19 @@ impl TryFrom<u8> for AbdMsgType {
 #[rkyv(compare(PartialEq), derive(Debug))]
 pub struct AbdMsg {
     pub _magic: u32,
-    pub sender: u8,
-    pub type_: u8,
+    pub sender: u32,
+    pub type_: u32,
     pub tag: u64,
     pub value: u64,
     pub counter: u64,
 }
 
 impl AbdMsg {
-    pub fn new(sender: u8, ty: AbdMsgType, tag: u64, value: u64, counter: u64) -> Self {
+    pub fn new(sender: u32, ty: AbdMsgType, tag: u64, value: u64, counter: u64) -> Self {
         Self {
             _magic: ABD_MAGIC,
             sender,
-            type_: ty as u8,
+            type_: ty as u32,
             tag,
             value,
             counter,

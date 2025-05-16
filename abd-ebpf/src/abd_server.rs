@@ -1,15 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::net::Ipv4Addr;
-
-use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg};
+use abd_common::{AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ABD_SERVER_UDP_PORT, ABD_WRITER_ID};
 use abd_ebpf::helpers::{
-    common::parse_abd_packet,
-    xdp::{
-        set_eth_dst_addr, swap_ipv4_addrs, swap_eth_addrs,
-        swap_udp_ports,
-    },
+    common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket},
+    xdp::{set_eth_dst_addr, swap_eth_addrs, swap_ipv4_addrs, swap_udp_ports},
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT},
@@ -19,16 +14,17 @@ use aya_ebpf::{
     programs::XdpContext,
 };
 use aya_log_ebpf::{error, info, warn};
-use rkyv::{munge::munge, seal::Seal};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
+use rkyv::munge::munge;
 
-#[no_mangle]
-static MAX_SERVERS: u32 = 16;
+const MAX_SERVERS: u32 = 16;
 
+/// set from userspace
 #[no_mangle]
 static NUM_SERVERS: u32 = MAX_SERVERS;
 
 #[no_mangle]
-static SERVER_ID: u8 = 0;
+static SERVER_ID: u32 = 0;
 
 #[map]
 static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
@@ -36,16 +32,21 @@ static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
 #[map]
 static SERVER_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
 
-// TODO: replace with a HashMap
 #[map]
-static TAG: Array<u64> = Array::<u64>::with_max_entries(1, 0);
-
-// TODO: replace with a HashMap
-#[map]
-static VALUE: Array<u64> = Array::<u64>::with_max_entries(1, 0);
+static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
 #[map]
-static COUNTERS: HashMap<u8, u64> = HashMap::<u8, u64>::with_max_entries(MAX_SERVERS, 0);
+static VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
+
+/// counter for each sender
+#[map]
+static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(MAX_SERVERS, 0);
+
+/// Small struct for “where to send the reply”
+struct Dest {
+    mac: [u8; 6],
+    ifindex: u32,
+}
 
 #[xdp]
 pub fn abd_server(ctx: XdpContext) -> u32 {
@@ -62,205 +63,212 @@ fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
         return Err(());
     }
 
-    let pkt = match parse_abd_packet(&ctx) {
+    let pkt = match parse_abd_packet(&ctx, ABD_SERVER_UDP_PORT) {
         Ok(p) => p,
         Err(_) => return Ok(XDP_PASS),
     };
 
-    let (return_mac, return_ifindex) = match pkt.msg.type_.try_into()? {
-        AbdMsgType::Read => handle_read(&ctx, pkt.msg, server_id)?,
-        AbdMsgType::Write => handle_write(&ctx, pkt.msg, server_id)?,
+    match pkt.msg.type_.to_native().try_into()? {
+        AbdMsgType::Read => handle_read(&ctx, pkt, server_id),
+        AbdMsgType::Write => handle_write(&ctx, pkt, server_id),
         _ => {
             warn!(
                 &ctx,
-                "Server {}: Received unexpected message type {} from sender {}, dropping...",
+                "Server {}: Received unexpected message type {} from @{}, dropping...",
                 server_id,
-                pkt.msg.type_,
-                pkt.msg.sender
+                pkt.msg.type_.to_native(),
+                pkt.msg.sender.to_native()
             );
             return Ok(XDP_DROP);
         }
-    };
-
-    // TODO: move the rest of the code to a separate function
-    // TODO: generally improve error handling and clean up code
-
-    // Swap UDP Ports and disable checksum
-    // NB: This doesn't affect the checksum
-    swap_udp_ports(pkt.udph);
-    (*pkt.udph).check = 0; // TODO: recompute checksum
-    // note: l4_csum_replace isn't available in XDP, but csum_diff is. see examples:
-    // * https://github.com/riyaolin/aya-ebpf-lb-rs/blob/55bc95f25fc2dc2680cf8add874ad32dcdd3bedd/lb/lb-ebpf/src/main.rs#L133
-    // * https://github.com/loheagn/folonet/blob/fbdf1d8a939e6dd74391fb3a9a61053dd736cdfb/folonet-ebpf/src/main.rs#L117
-
-    // Flip IPs. Note this doesn't affect either UDP or IPv4 checksums
-    swap_ipv4_addrs(pkt.iph);
-
-    // Swap Ethernet src/dst and set dst→writer
-    swap_eth_addrs(pkt.eth);
-    set_eth_dst_addr(pkt.eth, &return_mac);
-
-    // Send response to writer
-    let ret = unsafe { bpf_redirect(return_ifindex, 0) } as u32;
-    if ret != XDP_REDIRECT {
-        error!(
-            &ctx,
-            "Failed to redirect to if{}, ret={}", return_ifindex, ret
-        );
-        return Ok(XDP_ABORTED);
     }
-
-    let dst_addr = Ipv4Addr::from(u32::from_be((*pkt.iph).dst_addr));
-    info!(
-        &ctx,
-        "Server {}: Responding on if{}, {}:{}",
-        server_id,
-        return_ifindex,
-        dst_addr,
-        u16::from_be((*pkt.udph).dest)
-    );
-    return Ok(ret);
 }
 
 /// Handle a read request
 /// Pre: magic number is correct, type is READ
 /// Returns the MAC and ifindex of the response recipient
-fn handle_read(
-    ctx: &XdpContext,
-    abd_msg: Seal<ArchivedAbdMsg>,
-    server_id: u8,
-) -> Result<([u8; 6], u32), ()> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, counter, .. } = abd_msg);
+fn handle_read(ctx: &XdpContext, pkt: AbdPacket, server_id: u32) -> Result<u32, ()> {
+    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, counter, .. } = pkt.msg);
 
+    let sender_id = sender.to_native() as u32;
     info!(
         ctx,
-        "Server {}: Received READ request from sender {}", server_id, *sender
+        "Server {}: Received READ request from @{}", server_id, sender_id
     );
 
+    // counter freshness check
     let counter = (*counter).to_native();
-    let counter_for_sender = unsafe { COUNTERS.get(&(*sender)) }.unwrap_or(&0);
-    if counter <= *counter_for_sender {
-        info!(
+    let counter_for_sender = *unsafe { COUNTERS.get(&(*sender).into()) }.unwrap_or(&0);
+    if counter <= counter_for_sender {
+        warn!(
             ctx,
-            "Server {}: Dropping READ request from sender {} due to counter (must be > {})",
+            "Server {}: Drop READ request from @{} due to counter (must be > {})",
             server_id,
-            *sender,
-            *counter_for_sender
+            sender_id,
+            counter_for_sender
         );
         return Err(());
     }
 
-    let _ = COUNTERS.insert(&sender, &counter, 0);
+    // update the counter for the sender
+    COUNTERS
+        .insert(&sender.to_native(), &counter, 0)
+        .map_err(|_| {
+            error!(ctx, "Failed to insert counter for @{}", sender_id);
+            ()
+        })?;
 
-    let (return_mac, return_ifindex) = get_response_info(ctx, *sender)?;
+    let dest = lookup_dest(ctx, sender_id)?;
 
-    unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
-    *type_ = AbdMsgType::ReadAck as u8;
-    *tag = (*TAG.get(0).unwrap_or(&0)).into();
-    *value = (*VALUE.get(0).unwrap_or(&0)).into();
+    let mut udp_csum = pkt.udph.check;
 
-    Ok((return_mac, return_ifindex))
+    calculate_udp_csum_update(ctx, &sender, server_id.into(), &mut udp_csum)?;
+    *sender = server_id.into();
+
+    calculate_udp_csum_update(ctx, &type_, AbdMsgType::ReadAck.into(), &mut udp_csum)?;
+    *type_ = AbdMsgType::ReadAck.into();
+
+    let tag_val = unsafe { TAG.get(&0) }.unwrap_or(&0);
+    calculate_udp_csum_update(ctx, &mut tag, tag_val.into(), &mut udp_csum)?;
+    *tag = tag_val.into();
+
+    let value_val = unsafe { VALUE.get(&0) }.unwrap_or(&0);
+    calculate_udp_csum_update(ctx, &mut value, value_val.into(), &mut udp_csum)?;
+    *value = value_val.into();
+
+    pkt.udph.check = udp_csum;
+
+    finish_and_redirect(ctx, server_id, pkt.udph, pkt.iph, pkt.eth, dest)
 }
 
 /// Handle a write request
 /// Pre: magic number is correct, type is WRITE
 /// Returns the MAC and ifindex of the response recipient
-fn handle_write(
-    ctx: &XdpContext,
-    abd_msg: Seal<ArchivedAbdMsg>,
-    server_id: u8,
-) -> Result<([u8; 6], u32), ()> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, tag, value, counter, .. } = abd_msg);
+fn handle_write(ctx: &XdpContext, pkt: AbdPacket, server_id: u32) -> Result<u32, ()> {
+    munge!(let ArchivedAbdMsg { mut sender, mut type_, tag, value, counter, .. } = pkt.msg);
+
+    let sender_id = sender.to_native() as u32;
 
     info!(
         ctx,
-        "Server {}: Received WRITE request from sender {}", server_id, *sender
+        "Server {}: Received WRITE request from @{}", server_id, sender_id,
     );
 
     let counter = (*counter).to_native();
-    let counter_for_sender = unsafe { COUNTERS.get(&sender) }.unwrap_or(&0);
-    if counter <= *counter_for_sender {
-        info!(
+    let counter_for_sender = *unsafe { COUNTERS.get(&sender_id) }.unwrap_or(&0);
+    if counter <= counter_for_sender {
+        warn!(
             ctx,
-            "Server {}: Dropping WRITE request from sender {} due to counter (must be > {})",
+            "Server {}: Drop WRITE request from @{} due to counter (must be > {})",
             server_id,
-            *sender,
-            *counter_for_sender
+            sender_id,
+            counter_for_sender
         );
         return Err(());
     }
 
-    let _ = COUNTERS.insert(&sender, &counter, 0);
+    // update the counter for the sender
+    COUNTERS.insert(&sender_id, &counter, 0).map_err(|_| {
+        error!(ctx, "Failed to insert counter for @{}", sender_id);
+        ()
+    })?;
 
-    let tag_ptr = TAG.get_ptr_mut(0).unwrap_or(&mut 0);
-    let value_ptr = VALUE.get_ptr_mut(0).unwrap_or(&mut 0);
+    let stored_tag = unsafe { TAG.get(&0) }.unwrap_or(&0);
 
-    if *tag <= unsafe { *tag_ptr } {
+    if *tag > *stored_tag {
+        TAG.insert(&0, &tag.to_native(), 0).map_err(|_| {
+            error!(ctx, "Failed to insert tag {}", (*tag).to_native());
+            ()
+        })?;
+        VALUE.insert(&0, &value.to_native(), 0).map_err(|_| {
+            error!(ctx, "Failed to insert value {}", (*value).to_native());
+            ()
+        })?;
+    } else {
         info!(
             ctx,
-            "Server {}: Dropping WRITE from sender {} due to tag (must be > {})",
+            "Server {}: Not updating tag ({} <= {})",
             server_id,
-            *sender,
             (*tag).to_native(),
-            *tag_ptr
-        );
+            *stored_tag
+        )
+    }
+
+    // craft response
+    let dest = lookup_dest(ctx, sender_id)?;
+    let mut udp_csum = pkt.udph.check;
+
+    calculate_udp_csum_update(ctx, &sender, server_id.into(), &mut udp_csum)?;
+    *sender = server_id.into();
+
+    calculate_udp_csum_update(ctx, &type_, AbdMsgType::WriteAck.into(), &mut udp_csum)?;
+    *type_ = AbdMsgType::WriteAck.into();
+
+    pkt.udph.check = udp_csum;
+
+    finish_and_redirect(ctx, server_id, pkt.udph, pkt.iph, pkt.eth, dest)
+}
+
+/// Swap UDP ports, IPs, and MACs, then redirect to the destination
+#[inline(always)]
+fn finish_and_redirect(
+    ctx: &XdpContext,
+    server_id: u32,
+    udph: &mut UdpHdr,
+    iph: &mut Ipv4Hdr,
+    eth: &mut EthHdr,
+    dest: Dest,
+) -> Result<u32, ()> {
+    let _ = udph;
+    // swap UDP ports (writer expects reply on ABD_UDP_PORT)
+    swap_udp_ports(udph);
+
+    // swap IPs + MACs so that writer/reader becomes dst
+    swap_ipv4_addrs(iph);
+    swap_eth_addrs(eth);
+    set_eth_dst_addr(eth, &dest.mac);
+
+    let act = unsafe { bpf_redirect(dest.ifindex, 0) } as u32;
+    if act != XDP_REDIRECT {
+        error!(ctx, "bpf_redirect failed: {}", act);
         return Err(());
     }
 
-    unsafe {
-        *tag_ptr = (*tag).into();
-        *value_ptr = (*value).into();
-    }
+    info!(
+        ctx,
+        "Server {}: Responding to {}:{}@if{}",
+        server_id,
+        iph.dst_addr(),
+        u16::from_be(udph.dest),
+        dest.ifindex
+    );
 
-    let (return_mac, return_ifindex) = get_response_info(ctx, *sender)?;
-
-    unsafe { *sender = core::ptr::read_volatile(&SERVER_ID).into() };
-    *type_ = AbdMsgType::WriteAck as u8;
-
-    Ok((return_mac, return_ifindex))
+    Ok(act)
 }
 
 /// Get the MAC and ifindex of the response recipient
-// TODO: refactor how this fn is called... perhaps store the sender before handling the request?
-fn get_response_info(ctx: &XdpContext, sender_id: u8) -> Result<([u8; 6], u32), ()> {
-    // sender id: 0 = writer, >0 = server
-    let return_mac: [u8; 6];
-    let return_ifindex: u32;
-    if sender_id == 0 {
-        // Get the writer info from the map
-        let writer_info = match WRITER_INFO.get(0) {
-            Some(info) => {
-                if info.ipv4.is_unspecified() || info.ifindex == 0 || info.mac == [0; 6] {
-                    error!(ctx, "Missing writer info");
-                    return Err(());
-                }
-                *info
-            }
-            None => {
-                error!(ctx, "Failed to get writer info");
-                return Err(());
-            }
-        };
-        return_mac = writer_info.mac;
-        return_ifindex = writer_info.ifindex;
+fn lookup_dest(ctx: &XdpContext, sender_id: u32) -> Result<Dest, ()> {
+    if sender_id == ABD_WRITER_ID {
+        // → writer
+        let w = WRITER_INFO.get(0).ok_or_else(|| {
+            error!(ctx, "writer map empty");
+            ()
+        })?;
+        Ok(Dest {
+            mac: w.mac,
+            ifindex: w.ifindex,
+        })
     } else {
-        let server_info = match SERVER_INFO.get((sender_id - 1) as u32) {
-            Some(info) => {
-                if info.ipv4.is_unspecified() || info.ifindex == 0 || info.mac == [0; 6] {
-                    error!(ctx, "Missing info for server {}", sender_id);
-                    return Err(());
-                }
-                *info
-            }
-            None => {
-                error!(ctx, "Failed to get info for server {}", sender_id);
-                return Err(());
-            }
-        };
-        return_mac = server_info.mac;
-        return_ifindex = server_info.ifindex;
+        let idx = sender_id - 1;
+        let s = SERVER_INFO.get(idx).ok_or_else(|| {
+            error!(ctx, "srv{} map empty", sender_id);
+            ()
+        })?;
+        Ok(Dest {
+            mac: s.mac,
+            ifindex: s.ifindex,
+        })
     }
-    Ok((return_mac, return_ifindex))
 }
 
 #[cfg(not(test))]

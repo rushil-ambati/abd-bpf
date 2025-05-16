@@ -8,7 +8,7 @@ use aya_log_ebpf::error;
 
 use super::{
     common::ptr_at,
-    offsets::{IP_CSUM_OFF, IP_DST_OFF, IP_SRC_OFF, UDP_CSUM_OFF, UDP_DST_OFF, UDP_SRC_OFF},
+    offsets::{IPH_CSUM_OFF, IPH_DST_OFF, IPH_SRC_OFF, UDPH_CSUM_OFF, UDPH_DST_OFF, UDPH_SRC_OFF},
 };
 
 /// Store a value `v` at the given `offset` in the packet header.
@@ -34,14 +34,14 @@ pub fn store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> Result<(),
 /// `port` is assumed to be in host byte order (little-endian).
 #[inline]
 pub fn set_udp_src_port(ctx: &TcContext, port: u16) -> Result<(), c_long> {
-    update_udp_port(ctx, UDP_SRC_OFF, port)
+    update_udp_port(ctx, UDPH_SRC_OFF, port)
 }
 
 /// Set the UDP destination port in the packet header.
 /// `port`` is assumed to be in host byte order (little-endian).
 #[inline]
 pub fn set_udp_dst_port(ctx: &TcContext, port: u16) -> Result<(), c_long> {
-    update_udp_port(ctx, UDP_DST_OFF, port)
+    update_udp_port(ctx, UDPH_DST_OFF, port)
 }
 
 /// Overwrites the UDP port in the packet header at the given `offset`
@@ -56,8 +56,12 @@ fn update_udp_port(ctx: &TcContext, offset: usize, port: u16) -> Result<(), c_lo
     let old_port = unsafe { *old_port_ptr };
     let new_port = port.to_be();
 
+    if old_port == new_port {
+        return Ok(());
+    }
+
     ctx.l4_csum_replace(
-        UDP_CSUM_OFF,
+        UDPH_CSUM_OFF,
         old_port as u64,
         new_port as u64,
         size_of_val(&new_port) as u64,
@@ -69,13 +73,13 @@ fn update_udp_port(ctx: &TcContext, offset: usize, port: u16) -> Result<(), c_lo
 /// Set the IPv4 source address in the packet header to the given `ip`.
 #[inline]
 pub fn set_ipv4_src_addr(ctx: &TcContext, ip: Ipv4Addr) -> Result<(), c_long> {
-    set_ipv4_addr(ctx, IP_SRC_OFF, ip)
+    set_ipv4_addr(ctx, IPH_SRC_OFF, ip)
 }
 
 /// Set the IPv4 destination address in the packet header to the given `ip`.
 #[inline]
 pub fn set_ipv4_dst_addr(ctx: &TcContext, ip: Ipv4Addr) -> Result<(), c_long> {
-    set_ipv4_addr(ctx, IP_DST_OFF, ip)
+    set_ipv4_addr(ctx, IPH_DST_OFF, ip)
 }
 
 /// Overwrites the IPv4 address in the packet header at the given offset
@@ -88,9 +92,13 @@ fn set_ipv4_addr(ctx: &TcContext, offset: usize, ip: Ipv4Addr) -> Result<(), c_l
     let old_ip = unsafe { *old_ip_ptr };
     let new_ip = u32::from(ip).to_be();
 
+    if old_ip == new_ip {
+        return Ok(());
+    }
+
     // note: the IP address is part of the UDP pseudo header, hence BPF_F_PSEUDO_HDR is used
     ctx.l4_csum_replace(
-        UDP_CSUM_OFF,
+        UDPH_CSUM_OFF,
         old_ip as u64,
         new_ip as u64,
         (BPF_F_PSEUDO_HDR as u64) | (size_of_val(&new_ip) as u64),
@@ -100,7 +108,7 @@ fn set_ipv4_addr(ctx: &TcContext, offset: usize, ip: Ipv4Addr) -> Result<(), c_l
     })?;
 
     ctx.l3_csum_replace(
-        IP_CSUM_OFF,
+        IPH_CSUM_OFF,
         old_ip as u64,
         new_ip as u64,
         core::mem::size_of_val(&new_ip) as u64,

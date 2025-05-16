@@ -6,6 +6,10 @@ edition = "2021"
 [dependencies]
 abd-common = { path = "../abd-common" }
 rkyv = "0.8.10"
+clap = { workspace = true, default-features = true, features = ["derive"] }
+log.workspace = true
+anyhow.workspace = true
+env_logger.workspace = true
 
 [[bin]]
 name = "abd-client"
