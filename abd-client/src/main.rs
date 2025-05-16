@@ -1,6 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use abd_common::{AbdMsg, AbdMsgType, ArchivedAbdMsg, ABD_UDP_PORT};
@@ -131,8 +131,8 @@ fn main() -> anyhow::Result<()> {
 
     let mut buf = [0u8; 1024];
     let (n, from) = sock.recv_from(&mut buf)?;
-    let rtt = start.elapsed();
-    debug!("↙  response ({n} bytes) from {from} — RTT {rtt:?}");
+    let elapsed = start.elapsed();
+    debug!("↙  response ({n} bytes) from {from}");
 
     let archived = rkyv::access::<ArchivedAbdMsg, RkyvError>(&buf[..n])
         .map_err(|e| anyhow::anyhow!("deserialise: {e}"))?;
@@ -140,21 +140,24 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("deserialise (stage 2): {e}"))?;
     debug!("Deserialised response: {resp:?}");
 
-    report(&resp);
+    report(&resp, elapsed);
     Ok(())
 }
 
-fn report(resp: &AbdMsg) {
+fn report(resp: &AbdMsg, elapsed: Duration) {
     match resp.type_.try_into() {
         Ok(msg_type @ AbdMsgType::WriteAck) => {
-            info!("✅  {msg_type:?}");
+            info!("✅  {msg_type:?}. Took {elapsed:?}");
             debug!(
                 "sender={} tag={} value={} counter={}",
                 resp.sender, resp.tag, resp.value, resp.counter
             );
         }
         Ok(msg_type @ AbdMsgType::ReadAck) => {
-            info!("✅  {msg_type:?} tag={} value={}", resp.tag, resp.value);
+            info!(
+                "✅  {msg_type:?} tag={} value={}. Took {elapsed:?}",
+                resp.tag, resp.value
+            );
             debug!(
                 "sender={} tag={} value={} counter={}",
                 resp.sender, resp.tag, resp.value, resp.counter

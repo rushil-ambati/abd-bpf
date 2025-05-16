@@ -155,7 +155,7 @@ fn handle_write(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
 fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     info!(
         ctx,
-        "Received W-ACK from @{} (tag={}, value={}, counter={})",
+        "Received WriteAck from @{} (tag={}, value={}, counter={})",
         pkt.msg.sender.to_native(),
         pkt.msg.tag.to_native(),
         pkt.msg.value.to_native(),
@@ -167,7 +167,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     if busy == 0 {
         info!(
             ctx,
-            "No write in progress – drop W-ACK from @{}",
+            "No write in progress – drop WriteAck from @{}",
             pkt.msg.sender.to_native()
         );
         return Ok(TC_ACT_SHOT);
@@ -178,7 +178,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     if pkt.msg.counter.to_native() != *current_wc {
         warn!(
             ctx,
-            "W-ACK counter mismatch (expected {}, got {})",
+            "WriteAck counter mismatch (expected {}, got {})",
             *current_wc,
             pkt.msg.counter.to_native()
         );
@@ -200,12 +200,12 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
 
         // send ACK to the client
         redirect_write_ack_to_client(&ctx, pkt).inspect_err(|_| {
-            error!(ctx, "Failed to redirect W-ACK to client");
+            error!(ctx, "Failed to redirect WriteAck to client");
         })
     } else {
         info!(
             ctx,
-            "Got {} W-ACK(s), waiting for majority ({})...", new_ack_cnt, majority
+            "Got {} WriteAck(s), waiting for majority ({})...", new_ack_cnt, majority
         );
         Ok(TC_ACT_SHOT)
     }
@@ -270,7 +270,7 @@ fn redirect_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, 
 
     info!(
         ctx,
-        "Sending W-ACK to client {}:{}@if{}", client.ipv4, client.port, client.ifindex
+        "Sending WriteAck to client {}:{}@if{}", client.ipv4, client.port, client.ifindex
     );
 
     // ABD

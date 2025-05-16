@@ -65,6 +65,7 @@ static MAX_TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static MAX_VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
+// TODO: tidy up, match style of files, better error handling, better logging
 /* ------------------------------------------------------------------------- */
 /*                               Entry point                                 */
 /* ------------------------------------------------------------------------- */
@@ -184,6 +185,10 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     let ack = incr_ack()?; // helper below
     let majority = (unsafe { core::ptr::read_volatile(&NUM_SERVERS) } >> 1) + 1;
     if ack < (majority as u64) {
+        info!(
+            ctx,
+            "Got {} ReadAck(s), waiting for majority ({})...", ack, majority
+        );
         return Ok(TC_ACT_SHOT);
     }
 
@@ -236,9 +241,19 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
         return Ok(TC_ACT_SHOT);
     }
 
+    info!(
+        ctx,
+        "Phase-2: received WriteAck from @{}",
+        pkt.msg.sender.to_native(),
+    );
+
     let ack = incr_ack()?;
     let majority = (unsafe { core::ptr::read_volatile(&NUM_SERVERS) } >> 1) + 1;
     if ack < (majority as u64) {
+        info!(
+            ctx,
+            "Got {} WriteAck(s), waiting for majority ({})...", ack, majority
+        );
         return Ok(TC_ACT_SHOT);
     }
 
@@ -247,6 +262,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     READING_FLAG.remove(&0).ok();
     ACK_COUNT.remove(&0).ok();
 
+    // TODO: correctness - is it ok to send this ack early (before propagation)?
     send_read_ack_to_client(ctx, pkt)
 }
 
@@ -287,6 +303,15 @@ fn broadcast_to_nodes(ctx: &TcContext) -> Result<(), ()> {
 /// After phase-2 majority, send ReadAck to original client
 fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     let cli = unsafe { CLIENT_INFO.get(&0) }.ok_or(())?;
+
+    info!(
+        ctx,
+        "Sending ReadAck to client @{} (tag={} value={})",
+        cli.ipv4,
+        pkt.msg.tag.to_native(),
+        pkt.msg.value.to_native()
+    );
+
     let max_tag = *unsafe { MAX_TAG.get(&0) }.unwrap_or(&0);
     let max_value = *unsafe { MAX_VALUE.get(&0) }.unwrap_or(&0);
 

@@ -23,6 +23,7 @@ const MAX_SERVERS: u32 = 16;
 #[no_mangle]
 static NUM_SERVERS: u32 = MAX_SERVERS;
 
+// TODO: rename this to NODE_ID everywhere
 #[no_mangle]
 static SERVER_ID: u32 = 0;
 
