@@ -86,13 +86,13 @@ impl AbdMsg {
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
-pub struct AbdActorInfo {
+pub struct NodeInfo {
     pub ipv4: Ipv4Addr,
     pub ifindex: u32,
     pub mac: [u8; 6],
 }
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for AbdActorInfo {}
+unsafe impl aya::Pod for NodeInfo {}
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

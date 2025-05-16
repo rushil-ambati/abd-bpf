@@ -4,7 +4,7 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
+    AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
     ABD_UDP_PORT, ABD_WRITER_ID,
 };
 use abd_ebpf::helpers::{
@@ -22,15 +22,17 @@ use aya_ebpf::{
 use aya_log_ebpf::{error, info, warn};
 use rkyv::munge::munge;
 
-/// set from userspace
+/// Total number of nodes in the system (set from userspace)
 #[no_mangle]
 static NUM_NODES: u32 = 0;
 
-#[map]
-static NODES: Array<AbdActorInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
+/// ID of this node (set from userspace)
+#[no_mangle]
+static SELF_ID: u32 = 0;
 
+/// Nodes in the system (populated from userspace)
 #[map]
-static SELF_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 
 #[map]
 static CLIENT_INFO: HashMap<u32, ClientInfo> = HashMap::with_max_entries(1, 0);
@@ -39,15 +41,15 @@ static CLIENT_INFO: HashMap<u32, ClientInfo> = HashMap::with_max_entries(1, 0);
 #[map]
 static WRITING_FLAG: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
 
-/// monotonically-increasing tag
+/// Monotonically-increasing tag
 #[map]
 static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
-/// monotonically-increasing write-counter
+/// Monotonically-increasing write-counter
 #[map]
 static WRITE_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
-/// ACK counter for current write
+/// Acknowledgment count for the current write
 #[map]
 static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
@@ -60,7 +62,13 @@ pub fn writer(ctx: TcContext) -> i32 {
 }
 
 fn try_writer(ctx: TcContext) -> Result<i32, ()> {
-    let pkt = match parse_abd_packet(&ctx, ABD_UDP_PORT) {
+    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    if num_nodes == 0 {
+        error!(&ctx, "NUM_NODES is not set");
+        return Err(());
+    }
+
+    let pkt = match parse_abd_packet(&ctx, ABD_UDP_PORT, num_nodes) {
         Ok(p) => p,
         Err(_) => return Ok(TC_ACT_PIPE),
     };
@@ -220,7 +228,8 @@ fn broadcast_to_servers(ctx: &TcContext) -> Result<(), ()> {
         error!(ctx, "Failed to update the destination UDP port");
     })?;
 
-    let writer = SELF_INFO.get(0).ok_or_else(|| {
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    let writer = NODES.get(self_id).ok_or_else(|| {
         error!(ctx, "Failed to get writer info");
     })?;
 
@@ -233,9 +242,9 @@ fn broadcast_to_servers(ctx: &TcContext) -> Result<(), ()> {
     })?;
 
     let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
-    for i in 0..num_nodes {
+    for i in 1..=num_nodes {
         let server = NODES.get(i).ok_or_else(|| {
-            error!(ctx, "Failed to get info for @{}", i + 1);
+            error!(ctx, "Failed to get info for @{}", i);
         })?;
 
         // set L3/L2 destination addresses as server
@@ -248,14 +257,11 @@ fn broadcast_to_servers(ctx: &TcContext) -> Result<(), ()> {
 
         // clone+redirect
         ctx.clone_redirect(server.ifindex, 0).map_err(|ret| {
-            error!(ctx, "Failed to clone+redirect to @{}, ret={}", i + 1, ret);
+            error!(ctx, "Failed to clone+redirect to @{}, ret={}", i, ret);
         })?;
         info!(
             ctx,
-            "clone_redirect→server{} ({}@if{})",
-            i + 1,
-            server.ipv4,
-            server.ifindex
+            "clone_redirect→server{} ({}@if{})", i, server.ipv4, server.ifindex
         );
     }
     Ok(())
@@ -275,8 +281,9 @@ fn redirect_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, 
     let mut udp_csum = pkt.udph.check;
 
     // clear internal message fields
-    calculate_udp_csum_update(ctx, &sender, 0.into(), &mut udp_csum)?;
-    *sender = ABD_WRITER_ID.into();
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    calculate_udp_csum_update(ctx, &sender, self_id.into(), &mut udp_csum)?;
+    *sender = self_id.into();
 
     calculate_udp_csum_update(ctx, &tag, 0.into(), &mut udp_csum)?;
     *tag = 0.into();
@@ -286,7 +293,7 @@ fn redirect_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, 
 
     pkt.udph.check = udp_csum;
 
-    let writer = SELF_INFO.get(0).ok_or(())?;
+    let writer = NODES.get(ABD_WRITER_ID).ok_or(())?;
 
     // L4
     set_udp_dst_port(ctx, ABD_UDP_PORT).map_err(|_| {

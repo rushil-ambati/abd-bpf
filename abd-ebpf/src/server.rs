@@ -1,9 +1,7 @@
 #![no_std]
 #![no_main]
 
-use abd_common::{
-    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ABD_NODE_MAX, ABD_SERVER_UDP_PORT, ABD_WRITER_ID,
-};
+use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT};
 use abd_ebpf::helpers::{
     common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket},
     xdp::{set_eth_dst_addr, swap_eth_addrs, swap_ipv4_addrs, swap_udp_ports},
@@ -19,27 +17,27 @@ use aya_log_ebpf::{error, info, warn};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 use rkyv::munge::munge;
 
-/// set from userspace
+/// Total number of nodes in the system (set from userspace)
 #[no_mangle]
-static NUM_NODES: u32 = ABD_NODE_MAX;
+static NUM_NODES: u32 = 0;
 
-/// ABD node ID (shared with the reader running on the same node)
+/// ID of this node (set from userspace)
 #[no_mangle]
-static NODE_ID: u32 = 0;
+static SELF_ID: u32 = 0;
 
+/// Nodes in the system (populated from userspace)
 #[map]
-static WRITER_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 
-#[map]
-static NODES: Array<AbdActorInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
-
+/// Current tag (timestamp) for the stored value
 #[map]
 static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
+/// Current stored value
 #[map]
 static VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
-/// counter for each sender
+/// Per-sender request counter
 #[map]
 static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(ABD_NODE_MAX, 0);
 
@@ -58,25 +56,31 @@ pub fn server(ctx: XdpContext) -> u32 {
 }
 
 fn try_server(ctx: XdpContext) -> Result<u32, ()> {
-    let node_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
-    if node_id == 0 {
-        error!(&ctx, "Server ID is not set");
+    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    if num_nodes == 0 {
+        error!(&ctx, "NUM_NODES is not set");
         return Err(());
     }
 
-    let pkt = match parse_abd_packet(&ctx, ABD_SERVER_UDP_PORT) {
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    if self_id == 0 {
+        error!(&ctx, "Node ID is not set");
+        return Err(());
+    }
+
+    let pkt = match parse_abd_packet(&ctx, ABD_SERVER_UDP_PORT, num_nodes) {
         Ok(p) => p,
         Err(_) => return Ok(XDP_PASS),
     };
 
     match pkt.msg.type_.to_native().try_into()? {
-        AbdMsgType::Read => handle_read(&ctx, pkt, node_id),
-        AbdMsgType::Write => handle_write(&ctx, pkt, node_id),
+        AbdMsgType::Read => handle_read(&ctx, pkt, self_id),
+        AbdMsgType::Write => handle_write(&ctx, pkt, self_id),
         _ => {
             warn!(
                 &ctx,
                 "Server {}: Received unexpected message type {} from @{}, dropping...",
-                node_id,
+                self_id,
                 pkt.msg.type_.to_native(),
                 pkt.msg.sender.to_native()
             );
@@ -248,28 +252,16 @@ fn finish_and_redirect(
 }
 
 /// Get the MAC and ifindex of the response recipient
+#[inline(always)]
 fn lookup_dest(ctx: &XdpContext, sender_id: u32) -> Result<Dest, ()> {
-    if sender_id == ABD_WRITER_ID {
-        // → writer
-        let w = WRITER_INFO.get(0).ok_or_else(|| {
-            error!(ctx, "writer map empty");
-            ()
-        })?;
-        Ok(Dest {
-            mac: w.mac,
-            ifindex: w.ifindex,
-        })
-    } else {
-        let idx = sender_id - 1;
-        let s = NODES.get(idx).ok_or_else(|| {
-            error!(ctx, "srv{} map empty", sender_id);
-            ()
-        })?;
-        Ok(Dest {
-            mac: s.mac,
-            ifindex: s.ifindex,
-        })
-    }
+    let node = NODES.get(sender_id).ok_or_else(|| {
+        error!(ctx, "writer map empty");
+        ()
+    })?;
+    Ok(Dest {
+        mac: node.mac,
+        ifindex: node.ifindex,
+    })
 }
 
 #[cfg(not(test))]

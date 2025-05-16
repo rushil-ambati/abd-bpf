@@ -1,4 +1,5 @@
-use abd::helpers::map_utils::{populate_nodes_map, populate_writer_info_map};
+use abd::helpers::map_utils::populate_nodes_map;
+use abd_common::ABD_WRITER_ID;
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::EbpfLoader;
 use clap::Parser;
@@ -42,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
+        .set_global("SELF_ID", &ABD_WRITER_ID, true) // not used in writer
         .set_global("NUM_NODES", &num_nodes, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
@@ -63,8 +65,6 @@ async fn main() -> anyhow::Result<()> {
     let network_interfaces = NetworkInterface::show().unwrap();
     let nodes_map = ebpf.map_mut("NODES").unwrap();
     populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;
-    let writer_info_map = ebpf.map_mut("SELF_INFO").unwrap();
-    populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

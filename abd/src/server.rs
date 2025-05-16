@@ -1,4 +1,4 @@
-use abd::helpers::map_utils::{populate_nodes_map, populate_writer_info_map};
+use abd::helpers::map_utils::populate_nodes_map;
 use anyhow::Context;
 use aya::programs::{Xdp, XdpFlags};
 use aya::EbpfLoader;
@@ -52,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
-        .set_global("NODE_ID", &node_id, true)
         .set_global("NUM_NODES", &num_nodes, true)
+        .set_global("SELF_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/server"
@@ -71,8 +71,6 @@ async fn main() -> anyhow::Result<()> {
     let network_interfaces = NetworkInterface::show().unwrap();
     let nodes_map = ebpf.map_mut("NODES").unwrap();
     populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;
-    let writer_info_map = ebpf.map_mut("WRITER_INFO").unwrap();
-    populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

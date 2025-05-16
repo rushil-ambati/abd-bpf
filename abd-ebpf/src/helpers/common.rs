@@ -49,7 +49,7 @@ pub struct AbdPacket<'a> {
 }
 
 /// Parse an ABD packet from a context
-pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16) -> Result<AbdPacket, ()> {
+pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Result<AbdPacket, ()> {
     // Ethernet → must be IPv4
     let eth_ptr: *mut EthHdr = ptr_at(ctx, 0)?;
     if unsafe { (*eth_ptr).ether_type } != EtherType::Ipv4 {
@@ -86,7 +86,15 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16) -> Result<AbdPacket, (
     let msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(slice) };
 
     // Check the magic number
-    if (*msg)._magic != ABD_MAGIC {
+    let magic = (*msg)._magic;
+    if magic != ABD_MAGIC {
+        return Err(());
+    }
+
+    // Check the sender ID
+    let sender = (*msg).sender;
+    if sender > num_nodes {
+        error!(ctx, "Invalid sender ID: {}", sender.to_native());
         return Err(());
     }
 

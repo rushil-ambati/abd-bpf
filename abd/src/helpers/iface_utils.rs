@@ -1,4 +1,4 @@
-use abd_common::AbdActorInfo;
+use abd_common::NodeInfo;
 use anyhow::Result;
 use network_interface::NetworkInterface;
 use std::process::Command;
@@ -7,7 +7,7 @@ use std::process::Command;
 pub(crate) fn get_iface_info(
     ifaces: &Vec<NetworkInterface>,
     netns_name: &str,
-) -> Result<AbdActorInfo, anyhow::Error> {
+) -> Result<NodeInfo, anyhow::Error> {
     let iface = ifaces
         .iter()
         .find(|iface| iface.name == netns_name)
@@ -42,7 +42,7 @@ pub(crate) fn get_iface_info(
 
     let mac = parse_mac(String::from_utf8_lossy(&output.stdout).trim())?;
 
-    Ok(AbdActorInfo {
+    Ok(NodeInfo {
         ipv4: ipv4_addr,
         ifindex: idx,
         mac,

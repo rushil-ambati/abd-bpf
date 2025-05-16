@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
         .set_global("NUM_NODES", &num_nodes, true)
-        .set_global("NODE_ID", &node_id, true)
+        .set_global("SELF_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/reader"

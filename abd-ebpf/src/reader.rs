@@ -4,7 +4,7 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
+    AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
     ABD_UDP_PORT,
 };
 use abd_ebpf::helpers::{
@@ -22,21 +22,17 @@ use aya_ebpf::{
 use aya_log_ebpf::{error, info, warn};
 use rkyv::munge::munge;
 
-/// set from user-space
+/// Total number of nodes in the system (set from userspace)
 #[no_mangle]
 static NUM_NODES: u32 = 0;
 
-/// ABD node ID (shared with the server running on the same node)
+/// ID of this node (set from userspace)
 #[no_mangle]
-static NODE_ID: u32 = 0;
+static SELF_ID: u32 = 0;
 
-/* ------------------------------------------------------------------------- */
-/*                                   MAPS                                    */
-/* ------------------------------------------------------------------------- */
-
-/// Read-only list of all nodes (= replicas)
+/// Nodes in the system (populated from userspace)
 #[map]
-static NODES: Array<AbdActorInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 
 /// Client we’re serving right now (key = 0)
 #[map]
@@ -58,7 +54,7 @@ static READ_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
-/// Aggregation result from phase-1
+/// Aggregation results from phase-1
 #[map]
 static MAX_TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
@@ -78,7 +74,19 @@ pub fn reader(ctx: TcContext) -> i32 {
 }
 
 fn try_reader(ctx: TcContext) -> Result<i32, ()> {
-    let pkt = match parse_abd_packet(&ctx, ABD_UDP_PORT) {
+    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    if num_nodes == 0 {
+        error!(&ctx, "NUM_NODES is not set");
+        return Err(());
+    }
+
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    if self_id == 0 {
+        error!(&ctx, "Node ID is not set");
+        return Err(());
+    }
+
+    let pkt = match parse_abd_packet(&ctx, ABD_UDP_PORT, num_nodes) {
         Ok(p) => p,
         Err(_) => return Ok(TC_ACT_PIPE),
     };
@@ -88,7 +96,16 @@ fn try_reader(ctx: TcContext) -> Result<i32, ()> {
         AbdMsgType::ReadAck => handle_read_ack(&ctx, pkt),
         AbdMsgType::WriteAck => handle_write_ack(&ctx, pkt),
         // Any other message → not our job
-        _ => Ok(TC_ACT_PIPE),
+        _ => {
+            warn!(
+                &ctx,
+                "Server {}: Received unexpected message type {} from @{}, dropping...",
+                self_id,
+                pkt.msg.type_.to_native(),
+                pkt.msg.sender.to_native()
+            );
+            return Ok(TC_ACT_SHOT);
+        }
     }
 }
 
@@ -139,9 +156,9 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     calculate_udp_csum_update(ctx, &counter, new_rc.into(), &mut csum)?;
     *counter = new_rc.into();
 
-    let new_sender = unsafe { core::ptr::read_volatile(&NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, new_sender.into(), &mut csum)?;
-    *sender = new_sender.into();
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    calculate_udp_csum_update(ctx, &sender, self_id.into(), &mut csum)?;
+    *sender = self_id.into();
 
     pkt.udph.check = csum;
 
@@ -204,14 +221,14 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     let max_value = *unsafe { MAX_VALUE.get(&0) }.unwrap_or(&0);
 
     let mut csum = pkt.udph.check;
-    let new_sender = unsafe { core::ptr::read_volatile(&NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, new_sender.into(), &mut csum)?;
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    calculate_udp_csum_update(ctx, &sender, self_id.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &type_, AbdMsgType::Write.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &tag, max_tag.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &value, max_value.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &counter, cur2.into(), &mut csum)?;
 
-    *sender = new_sender.into();
+    *sender = self_id.into();
     *type_ = AbdMsgType::Write.into();
     *tag = max_tag.into();
     *value = max_value.into();
@@ -261,7 +278,6 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     READING_FLAG.remove(&0).ok();
     ACK_COUNT.remove(&0).ok();
 
-    // TODO: correctness - is it ok to send this ack early (before propagation)?
     send_read_ack_to_client(ctx, pkt)
 }
 
@@ -280,7 +296,7 @@ fn broadcast_to_nodes(ctx: &TcContext) -> Result<(), ()> {
     set_udp_dst_port(ctx, ABD_SERVER_UDP_PORT).ok();
 
     // ensure src = this node
-    let me = unsafe { NODES.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
+    let me = unsafe { NODES.get(core::ptr::read_volatile(&SELF_ID)) }.ok_or_else(|| {
         error!(ctx, "self info missing");
         ()
     })?;
@@ -288,8 +304,8 @@ fn broadcast_to_nodes(ctx: &TcContext) -> Result<(), ()> {
     store(ctx, ETH_SRC_OFF, &me.mac, 0).ok();
 
     let num = unsafe { core::ptr::read_volatile(&NUM_NODES) };
-    for idx in 0..num {
-        let peer = NODES.get(idx).ok_or(())?;
+    for i in 1..=num {
+        let peer = NODES.get(i).ok_or(())?;
 
         set_ipv4_dst_addr(ctx, peer.ipv4).ok();
         store(ctx, ETH_DST_OFF, &peer.mac, 0).ok();
@@ -317,14 +333,14 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, mut counter, .. } = pkt.msg);
 
     let mut csum = pkt.udph.check;
-    let new_sender = unsafe { core::ptr::read_volatile(&NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, new_sender.into(), &mut csum)?;
+    let self_id = unsafe { core::ptr::read_volatile(&SELF_ID) };
+    calculate_udp_csum_update(ctx, &sender, self_id.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &type_, AbdMsgType::ReadAck.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &tag, max_tag.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &value, max_value.into(), &mut csum)?;
     calculate_udp_csum_update(ctx, &counter, 0u64.into(), &mut csum)?;
 
-    *sender = new_sender.into();
+    *sender = self_id.into();
     *type_ = AbdMsgType::ReadAck.into();
     *tag = max_tag.into();
     *value = max_value.into();
@@ -332,7 +348,7 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     pkt.udph.check = csum;
 
     // L2/L3/L4 back to client
-    let me = unsafe { NODES.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
+    let me = unsafe { NODES.get(core::ptr::read_volatile(&SELF_ID)) }.ok_or_else(|| {
         error!(ctx, "self info missing");
         ()
     })?;
