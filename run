@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NUM_SERVERS=3
+NUM_NODES=3
 DEBUG=0
 WAIT_FOR_SERVICES=0
 TESTENV=(sudo -n tools/testenv/testenv.sh)
@@ -16,6 +16,7 @@ mkdir -p logs
 rm -f logs/*
 
 # Run command in background, tee its log, and stream to stdout
+# Each name must be unique, otherwise tail will truncate the log file
 run_bg() {
   local name=$1
   shift
@@ -56,8 +57,8 @@ cleanup() {
 trap cleanup EXIT SIGINT SIGTERM
 
 usage() {
-  echo "Usage: $0 [-s NUM_SERVERS] [-d] [-w]" >&2
-  echo "  -s NUM_SERVERS  Number of server replicas (default: 3)"
+  echo "Usage: $0 [-s NUM_NODES] [-d] [-w]" >&2
+  echo "  -s NUM_NODES  Number of replica nodes (default: 3)"
   echo "  -d              Use debug build"
   echo "  -w              Wait for background services after client finishes"
   exit 1
@@ -66,7 +67,7 @@ usage() {
 # Parse args
 while getopts "s:dw" opt; do
   case $opt in
-  s) NUM_SERVERS=$OPTARG ;;
+  s) NUM_NODES=$OPTARG ;;
   d) DEBUG=1 ;;
   w) WAIT_FOR_SERVICES=1 ;;
   *) usage ;;
@@ -82,7 +83,7 @@ else
 fi
 
 # Setup testenvs
-for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
+for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/') writer; do
   "${TESTENV[@]}" setup --name "$env" --legacy-ip >/dev/null 2>&1 || true
 
   # Disable UDP TX checksum offloading
@@ -95,22 +96,22 @@ for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
 done
 
 # Run servers
-for i in $(seq 1 "$NUM_SERVERS"); do
-  env="server$i"
+for i in $(seq 1 "$NUM_NODES"); do
+  env="node$i"
   run_bg "$env" sudo -E bash -c \
     "RUST_LOG=info $TARGET_DIR/server \
-     --iface $env --num-servers=$NUM_SERVERS --server-id $i"
+     --iface $env --num-nodes=$NUM_NODES --node-id $i"
 done
 
 # Run writer with info logging
 run_bg "writer" sudo -E bash -c \
   "RUST_LOG=info $TARGET_DIR/writer \
-   --iface writer --num-servers=$NUM_SERVERS"
+   --iface writer --num-nodes=$NUM_NODES"
 
-# Run reader on server1
+# Run reader on node1
 run_bg "reader1" sudo -E bash -c \
   "RUST_LOG=info $TARGET_DIR/reader \
-   --iface server1 --num-servers=$NUM_SERVERS --node-id 1"
+   --iface node1 --num-nodes=$NUM_NODES --node-id 1"
 
 # Wait for services to initialize
 sleep 1
@@ -132,11 +133,11 @@ echo
 
 # Read
 reader1_ip=$(
-  "${TESTENV[@]}" -n server1 status |
+  "${TESTENV[@]}" -n node1 status |
     awk '/Iface:/ {print $4}' |
     cut -d'/' -f1
 )
-run_bg_and_wait "client_read_0" "${TESTENV[@]}" exec -n server1 -- bash -c "
+run_bg_and_wait "client_read_0" "${TESTENV[@]}" exec -n node1 -- bash -c "
   RUST_LOG=info $TARGET_DIR/client read $reader1_ip"
 
 # Leave the services running if requested

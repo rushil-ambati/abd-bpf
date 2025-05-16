@@ -4,7 +4,8 @@ use core::net::Ipv4Addr;
 
 use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
 
-pub const ABD_SERVER_IFACE_PREFIX: &str = "server";
+pub const ABD_NODE_MAX: u32 = 16;
+pub const ABD_NODE_IFACE_PREFIX: &str = "node";
 pub const ABD_WRITER_IFACE_NAME: &str = "writer";
 pub const ABD_WRITER_ID: u32 = 0;
 pub const ABD_UDP_PORT: u16 = 4242;

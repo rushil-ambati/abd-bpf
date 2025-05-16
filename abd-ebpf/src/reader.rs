@@ -4,7 +4,8 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_SERVER_UDP_PORT, ABD_UDP_PORT,
+    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
+    ABD_UDP_PORT,
 };
 use abd_ebpf::helpers::{
     common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket},
@@ -21,13 +22,11 @@ use aya_ebpf::{
 use aya_log_ebpf::{error, info, warn};
 use rkyv::munge::munge;
 
-const MAX_SERVERS: u32 = 16;
-
 /// set from user-space
 #[no_mangle]
-static NUM_SERVERS: u32 = 0;
+static NUM_NODES: u32 = 0;
 
-/// this server’s replica/reader id (same id as the server on the same node)
+/// ABD node ID (shared with the server running on the same node)
 #[no_mangle]
 static NODE_ID: u32 = 0;
 
@@ -37,7 +36,7 @@ static NODE_ID: u32 = 0;
 
 /// Read-only list of all nodes (= replicas)
 #[map]
-static NODE_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
+static NODES: Array<AbdActorInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 
 /// Client we’re serving right now (key = 0)
 #[map]
@@ -183,7 +182,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
 
     // bump ack counter
     let ack = incr_ack()?; // helper below
-    let majority = (unsafe { core::ptr::read_volatile(&NUM_SERVERS) } >> 1) + 1;
+    let majority = (unsafe { core::ptr::read_volatile(&NUM_NODES) } >> 1) + 1;
     if ack < (majority as u64) {
         info!(
             ctx,
@@ -248,7 +247,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     );
 
     let ack = incr_ack()?;
-    let majority = (unsafe { core::ptr::read_volatile(&NUM_SERVERS) } >> 1) + 1;
+    let majority = (unsafe { core::ptr::read_volatile(&NUM_NODES) } >> 1) + 1;
     if ack < (majority as u64) {
         info!(
             ctx,
@@ -281,16 +280,16 @@ fn broadcast_to_nodes(ctx: &TcContext) -> Result<(), ()> {
     set_udp_dst_port(ctx, ABD_SERVER_UDP_PORT).ok();
 
     // ensure src = this node
-    let me = unsafe { NODE_INFO.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
+    let me = unsafe { NODES.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
         error!(ctx, "self info missing");
         ()
     })?;
     set_ipv4_src_addr(ctx, me.ipv4).ok();
     store(ctx, ETH_SRC_OFF, &me.mac, 0).ok();
 
-    let num = unsafe { core::ptr::read_volatile(&NUM_SERVERS) };
+    let num = unsafe { core::ptr::read_volatile(&NUM_NODES) };
     for idx in 0..num {
-        let peer = NODE_INFO.get(idx).ok_or(())?;
+        let peer = NODES.get(idx).ok_or(())?;
 
         set_ipv4_dst_addr(ctx, peer.ipv4).ok();
         store(ctx, ETH_DST_OFF, &peer.mac, 0).ok();
@@ -333,7 +332,7 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     pkt.udph.check = csum;
 
     // L2/L3/L4 back to client
-    let me = unsafe { NODE_INFO.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
+    let me = unsafe { NODES.get(core::ptr::read_volatile(&NODE_ID) - 1) }.ok_or_else(|| {
         error!(ctx, "self info missing");
         ()
     })?;

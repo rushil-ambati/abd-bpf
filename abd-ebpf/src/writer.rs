@@ -4,8 +4,8 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_SERVER_UDP_PORT, ABD_UDP_PORT,
-    ABD_WRITER_ID,
+    AbdActorInfo, AbdMsgType, ArchivedAbdMsg, ClientInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
+    ABD_UDP_PORT, ABD_WRITER_ID,
 };
 use abd_ebpf::helpers::{
     common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket},
@@ -22,15 +22,12 @@ use aya_ebpf::{
 use aya_log_ebpf::{error, info, warn};
 use rkyv::munge::munge;
 
-// TODO: move this to a common place
-const MAX_SERVERS: u32 = 16;
-
 /// set from userspace
 #[no_mangle]
-static NUM_SERVERS: u32 = 0;
+static NUM_NODES: u32 = 0;
 
 #[map]
-static SERVER_INFO: Array<AbdActorInfo> = Array::with_max_entries(MAX_SERVERS, 0);
+static NODES: Array<AbdActorInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 
 #[map]
 static SELF_INFO: Array<AbdActorInfo> = Array::with_max_entries(1, 0);
@@ -193,7 +190,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> Result<i32, ()> {
     })?;
 
     // check if we have enough ACKs
-    let majority = ((unsafe { core::ptr::read_volatile(&NUM_SERVERS) }) >> 1) + 1;
+    let majority = ((unsafe { core::ptr::read_volatile(&NUM_NODES) }) >> 1) + 1;
     if new_ack_cnt >= (majority as u64) {
         WRITING_FLAG.remove(&0).ok(); // clear busy flag
         info!(ctx, "WRITE committed – {} ACKs", new_ack_cnt);
@@ -235,9 +232,9 @@ fn broadcast_to_servers(ctx: &TcContext) -> Result<(), ()> {
         error!(ctx, "Failed to update the source MAC address");
     })?;
 
-    let num_servers = unsafe { core::ptr::read_volatile(&NUM_SERVERS) };
-    for i in 0..num_servers {
-        let server = SERVER_INFO.get(i).ok_or_else(|| {
+    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    for i in 0..num_nodes {
+        let server = NODES.get(i).ok_or_else(|| {
             error!(ctx, "Failed to get info for @{}", i + 1);
         })?;
 

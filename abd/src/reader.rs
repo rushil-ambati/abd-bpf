@@ -1,4 +1,4 @@
-use abd::helpers::map_utils::populate_node_info_map;
+use abd::helpers::map_utils::populate_nodes_map;
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::EbpfLoader;
 use clap::Parser;
@@ -14,7 +14,7 @@ struct Args {
     iface: String,
     /// total # replicas
     #[arg(long)]
-    num_servers: u32,
+    num_nodes: u32,
     /// this node’s id (1‥N)
     #[arg(long)]
     node_id: u32,
@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
 
     let Args {
         iface,
-        num_servers,
+        num_nodes,
         node_id,
     } = Args::parse();
 
@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
-        .set_global("NUM_SERVERS", &num_servers, true)
+        .set_global("NUM_NODES", &num_nodes, true)
         .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
@@ -66,8 +66,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Populate the info maps
     let network_interfaces = NetworkInterface::show().unwrap();
-    let node_info_map = ebpf.map_mut("NODE_INFO").unwrap();
-    populate_node_info_map(node_info_map, &network_interfaces, num_servers)?;
+    let nodes_map = ebpf.map_mut("NODES").unwrap();
+    populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

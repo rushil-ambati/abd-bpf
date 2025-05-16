@@ -1,4 +1,4 @@
-use abd::helpers::map_utils::{populate_node_info_map, populate_writer_info_map};
+use abd::helpers::map_utils::{populate_nodes_map, populate_writer_info_map};
 use anyhow::Context;
 use aya::programs::{Xdp, XdpFlags};
 use aya::EbpfLoader;
@@ -16,13 +16,13 @@ struct Args {
     #[arg(short, long, default_value = "eth0")]
     iface: String,
 
-    /// ABD server ID
+    /// ABD node ID
     #[arg(short, long)]
-    server_id: u32,
+    node_id: u32,
 
     /// Number of servers
     #[arg(long)]
-    num_servers: u32,
+    num_nodes: u32,
 }
 
 #[tokio::main]
@@ -32,8 +32,8 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let Args {
         iface,
-        server_id,
-        num_servers,
+        node_id,
+        num_nodes,
     } = args;
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
@@ -52,8 +52,8 @@ async fn main() -> anyhow::Result<()> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
-        .set_global("SERVER_ID", &server_id, true)
-        .set_global("NUM_SERVERS", &num_servers, true)
+        .set_global("NODE_ID", &node_id, true)
+        .set_global("NUM_NODES", &num_nodes, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/server"
@@ -69,8 +69,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Populate the info maps
     let network_interfaces = NetworkInterface::show().unwrap();
-    let server_info_map = ebpf.map_mut("SERVER_INFO").unwrap();
-    populate_node_info_map(server_info_map, &network_interfaces, num_servers)?;
+    let nodes_map = ebpf.map_mut("NODES").unwrap();
+    populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;
     let writer_info_map = ebpf.map_mut("WRITER_INFO").unwrap();
     populate_writer_info_map(writer_info_map, &network_interfaces)?;
 
