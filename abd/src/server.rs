@@ -56,13 +56,13 @@ async fn main() -> anyhow::Result<()> {
         .set_global("NUM_SERVERS", &num_servers, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/abd-server"
+            "/server"
         )))?;
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
-    let program: &mut Xdp = ebpf.program_mut("abd_server").unwrap().try_into()?;
+    let program: &mut Xdp = ebpf.program_mut("server").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;

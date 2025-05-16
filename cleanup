@@ -11,19 +11,22 @@ usage() {
 TEARDOWN=false
 while getopts ":a" opt; do
   case $opt in
-    a) TEARDOWN=true ;;
-    *) usage ;;
+  a) TEARDOWN=true ;;
+  *) usage ;;
   esac
 done
 
 # pre‐cache sudo once
-sudo -v || { echo "need sudo"; exit 1; }
+sudo -v || {
+  echo "need sudo"
+  exit 1
+}
 
 # always kill any leftover processes
-sudo -n pkill -f "target/release/abd-client" || true
-sudo -n pkill -f "target/release/abd-writer" || true
-sudo -n pkill -f "target/release/abd-server" || true
-sudo -n pkill -f "target/release/xdp-pass"   || true
+sudo -n pkill -f "target/release/client" || true
+sudo -n pkill -f "target/release/writer" || true
+sudo -n pkill -f "target/release/server" || true
+sudo -n pkill -f "target/release/xdp-pass" || true
 
 if [[ "$TEARDOWN" = true ]]; then
   TESTENV="sudo -n tools/testenv/testenv.sh"
@@ -31,8 +34,8 @@ if [[ "$TEARDOWN" = true ]]; then
   # grab all the env names listed after "All existing environments:",
   # but bail out early if we see "No environments exist"
   ENVS=$(
-    $TESTENV status \
-      | awk '
+    $TESTENV status |
+      awk '
           /All existing environments:/ { p=1; next }
           p && NF {
             if ($1 == "No") exit

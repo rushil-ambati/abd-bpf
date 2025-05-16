@@ -55,14 +55,14 @@ static WRITE_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
 #[classifier]
-pub fn abd_writer(ctx: TcContext) -> i32 {
-    match try_abd_writer(ctx) {
+pub fn writer(ctx: TcContext) -> i32 {
+    match try_writer(ctx) {
         Ok(ret) => ret,
         Err(_) => TC_ACT_SHOT,
     }
 }
 
-fn try_abd_writer(ctx: TcContext) -> Result<i32, ()> {
+fn try_writer(ctx: TcContext) -> Result<i32, ()> {
     let pkt = match parse_abd_packet(&ctx, ABD_UDP_PORT) {
         Ok(p) => p,
         Err(_) => return Ok(TC_ACT_PIPE),

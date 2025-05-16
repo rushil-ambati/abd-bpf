@@ -71,7 +71,7 @@ static MAX_VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 /* ------------------------------------------------------------------------- */
 
 #[classifier]
-pub fn abd_reader(ctx: TcContext) -> i32 {
+pub fn reader(ctx: TcContext) -> i32 {
     match try_reader(ctx) {
         Ok(act) => act,
         Err(_) => TC_ACT_SHOT,

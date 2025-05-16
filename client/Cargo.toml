@@ -1,5 +1,5 @@
 [package]
-name = "abd-client"
+name = "client"
 version = "0.1.0"
 edition = "2021"
 
@@ -12,5 +12,5 @@ anyhow.workspace = true
 env_logger.workspace = true
 
 [[bin]]
-name = "abd-client"
+name = "client"
 path = "src/main.rs"

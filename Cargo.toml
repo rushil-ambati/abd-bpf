@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["abd", "abd-common", "abd-ebpf", "abd-client"]
-default-members = ["abd", "abd-common", "abd-client"]
+members = ["abd", "abd-common", "abd-ebpf", "client"]
+default-members = ["abd", "abd-common", "client"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }

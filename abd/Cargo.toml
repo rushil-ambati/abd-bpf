@@ -41,16 +41,16 @@ aya-build.workspace = true
 abd-ebpf = { path = "../abd-ebpf" }
 
 [[bin]]
-name = "abd-writer"
-path = "src/abd_writer.rs"
+name = "writer"
+path = "src/writer.rs"
 
 [[bin]]
-name = "abd-reader"
-path = "src/abd_reader.rs"
+name = "reader"
+path = "src/reader.rs"
 
 [[bin]]
-name = "abd-server"
-path = "src/abd_server.rs"
+name = "server"
+path = "src/server.rs"
 
 [[bin]]
 name = "xdp-pass"

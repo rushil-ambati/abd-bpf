@@ -50,14 +50,14 @@ struct Dest {
 }
 
 #[xdp]
-pub fn abd_server(ctx: XdpContext) -> u32 {
-    match try_abd_server(ctx) {
+pub fn server(ctx: XdpContext) -> u32 {
+    match try_server(ctx) {
         Ok(ret) => ret,
         Err(_) => XDP_ABORTED,
     }
 }
 
-fn try_abd_server(ctx: XdpContext) -> Result<u32, ()> {
+fn try_server(ctx: XdpContext) -> Result<u32, ()> {
     let server_id = unsafe { core::ptr::read_volatile(&SERVER_ID) };
     if server_id == 0 {
         error!(&ctx, "Server ID is not set");

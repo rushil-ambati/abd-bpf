@@ -63,26 +63,27 @@ for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
     bash -c "RUST_LOG=warn target/release/xdp-pass --iface veth0"
 done
 
-# Run abd-server on each server
+# Run servers
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
   run_bg "$env-server" sudo -E bash -c \
-    "RUST_LOG=info target/release/abd-server \
+    "RUST_LOG=info target/release/server \
      --iface $env --num-servers=$NUM_SERVERS --server-id $i"
 done
 
-# Run abd-writer with info logging
+# Run writer with info logging
 run_bg "writer" sudo -E bash -c \
-  "RUST_LOG=info target/release/abd-writer \
+  "RUST_LOG=info target/release/writer \
    --iface writer --num-servers=$NUM_SERVERS"
 
-# Run abd-reader on server1
+# Run reader on server1
 run_bg "reader1" sudo -E bash -c \
-  "RUST_LOG=info target/release/abd-reader \
+  "RUST_LOG=info target/release/reader \
    --iface server1 --num-servers=$NUM_SERVERS --node-id 1"
 
 # Wait for services to initialize
 sleep 1
+echo
 
 # Write
 writer_ip=$(
@@ -91,9 +92,10 @@ writer_ip=$(
     cut -d'/' -f1
 )
 run_bg "client_write" "${TESTENV[@]}" exec -n writer -- bash -c "
-  RUST_LOG=info target/release/abd-client write $writer_ip 42"
+  RUST_LOG=info target/release/client write $writer_ip 42"
 
 sleep 1
+echo
 
 # Read
 reader1_ip=$(
@@ -102,7 +104,7 @@ reader1_ip=$(
     cut -d'/' -f1
 )
 run_bg "client_read" "${TESTENV[@]}" exec -n server1 -- bash -c "
-  RUST_LOG=info target/release/abd-client read $reader1_ip"
+  RUST_LOG=info target/release/client read $reader1_ip"
 
 # Wait for all tasks
 wait
