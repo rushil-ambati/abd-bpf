@@ -27,14 +27,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::init();
+
     let args = Args::parse();
     let Args {
         iface,
         server_id,
         num_servers,
     } = args;
-
-    env_logger::init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/

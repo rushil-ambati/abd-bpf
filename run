@@ -2,6 +2,8 @@
 set -euo pipefail
 
 NUM_SERVERS=3
+DEBUG=0
+WAIT_FOR_SERVICES=0
 TESTENV=(sudo -n tools/testenv/testenv.sh)
 
 sudo -v || {
@@ -27,6 +29,24 @@ run_bg() {
   bg_pids+=($!)
 }
 
+# Run a foreground command, tee its log, stream it live, and wait only for the command
+# Each name must be unique, otherwise tail will truncate the log file
+run_bg_and_wait() {
+  local name=$1
+  shift
+  local logfile="logs/${name}.log"
+  : >"$logfile"
+
+  # Tail in background
+  tail -F "$logfile" &
+  bg_pids+=($!)
+
+  # Run the command in background
+  "$@" >"$logfile" 2>&1 &
+  local cmd_pid=$!
+  wait "$cmd_pid"
+}
+
 cleanup() {
   for pid in "${bg_pids[@]}"; do
     kill "$pid" 2>/dev/null || true
@@ -36,19 +56,30 @@ cleanup() {
 trap cleanup EXIT SIGINT SIGTERM
 
 usage() {
-  echo "Usage: $0 [-s NUM_SERVERS]" >&2
+  echo "Usage: $0 [-s NUM_SERVERS] [-d] [-w]" >&2
+  echo "  -s NUM_SERVERS  Number of server replicas (default: 3)"
+  echo "  -d              Use debug build"
+  echo "  -w              Wait for background services after client finishes"
   exit 1
 }
 
-while getopts "s:" opt; do
+# Parse args
+while getopts "s:dw" opt; do
   case $opt in
   s) NUM_SERVERS=$OPTARG ;;
+  d) DEBUG=1 ;;
+  w) WAIT_FOR_SERVICES=1 ;;
   *) usage ;;
   esac
 done
 
-# Build everything
-cargo build --release
+if [[ "$DEBUG" -eq 1 ]]; then
+  TARGET_DIR="target/debug"
+  cargo build --quiet
+else
+  TARGET_DIR="target/release"
+  cargo build --release --quiet
+fi
 
 # Setup testenvs
 for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
@@ -59,26 +90,26 @@ for env in $(seq 1 "$NUM_SERVERS" | sed 's/^/server/') writer; do
     bash -c "ethtool -K veth0 tx-checksum-ip-generic off >/dev/null 2>&1 || true"
 
   # Attach xdp-pass with warn-level logs
-  run_bg "$env-veth0" "${TESTENV[@]}" exec -n "$env" -- \
-    bash -c "RUST_LOG=warn target/release/xdp-pass --iface veth0"
+  run_bg "veth0_$env" "${TESTENV[@]}" exec -n "$env" -- \
+    bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
 done
 
 # Run servers
 for i in $(seq 1 "$NUM_SERVERS"); do
   env="server$i"
-  run_bg "$env-server" sudo -E bash -c \
-    "RUST_LOG=info target/release/server \
+  run_bg "$env" sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/server \
      --iface $env --num-servers=$NUM_SERVERS --server-id $i"
 done
 
 # Run writer with info logging
 run_bg "writer" sudo -E bash -c \
-  "RUST_LOG=info target/release/writer \
+  "RUST_LOG=info $TARGET_DIR/writer \
    --iface writer --num-servers=$NUM_SERVERS"
 
 # Run reader on server1
 run_bg "reader1" sudo -E bash -c \
-  "RUST_LOG=info target/release/reader \
+  "RUST_LOG=info $TARGET_DIR/reader \
    --iface server1 --num-servers=$NUM_SERVERS --node-id 1"
 
 # Wait for services to initialize
@@ -91,10 +122,12 @@ writer_ip=$(
     awk '/Iface:/ {print $4}' |
     cut -d'/' -f1
 )
-run_bg "client_write" "${TESTENV[@]}" exec -n writer -- bash -c "
-  RUST_LOG=info target/release/client write $writer_ip 42"
+run_bg_and_wait "client_write_42" "${TESTENV[@]}" exec -n writer -- bash -c "
+  RUST_LOG=info $TARGET_DIR/client write $writer_ip 42"
+echo
 
-sleep 1
+run_bg_and_wait "client_write_69" "${TESTENV[@]}" exec -n writer -- bash -c "
+  RUST_LOG=info $TARGET_DIR/client write $writer_ip 69"
 echo
 
 # Read
@@ -103,8 +136,10 @@ reader1_ip=$(
     awk '/Iface:/ {print $4}' |
     cut -d'/' -f1
 )
-run_bg "client_read" "${TESTENV[@]}" exec -n server1 -- bash -c "
-  RUST_LOG=info target/release/client read $reader1_ip"
+run_bg_and_wait "client_read_0" "${TESTENV[@]}" exec -n server1 -- bash -c "
+  RUST_LOG=info $TARGET_DIR/client read $reader1_ip"
 
-# Wait for all tasks
-wait
+# Leave the services running if requested
+if [[ "$WAIT_FOR_SERVICES" -eq 1 ]]; then
+  wait
+fi

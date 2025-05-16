@@ -22,11 +22,12 @@ sudo -v || {
   exit 1
 }
 
-# always kill any leftover processes
-sudo -n pkill -f "target/release/client" || true
-sudo -n pkill -f "target/release/writer" || true
-sudo -n pkill -f "target/release/server" || true
-sudo -n pkill -f "target/release/xdp-pass" || true
+# always kill any leftover processes in target/release or target/debug
+for dir in target/release target/debug; do
+  for proc in client reader writer server xdp-pass; do
+    sudo -n pkill -f "$dir/$proc" || true
+  done
+done
 
 if [[ "$TEARDOWN" = true ]]; then
   TESTENV="sudo -n tools/testenv/testenv.sh"

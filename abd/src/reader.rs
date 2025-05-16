@@ -2,7 +2,7 @@ use abd::helpers::map_utils::populate_node_info_map;
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::EbpfLoader;
 use clap::Parser;
-use log::{debug, info, warn};
+use log::{debug, info, logger, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
@@ -23,6 +23,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::init();
+
     let Args {
         iface,
         num_servers,
@@ -51,7 +52,7 @@ async fn main() -> anyhow::Result<()> {
             env!("OUT_DIR"),
             "/reader"
         )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf, logger()) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {}", e);
     }
