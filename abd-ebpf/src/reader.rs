@@ -38,6 +38,7 @@ static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
 #[map]
 static CLIENT_INFO: HashMap<u32, ClientInfo> = HashMap::with_max_entries(1, 0);
 
+// TODO: combine READING_FLAG and PHASE into a single value
 /// 0 = idle, 1 = busy
 #[map]
 static READING_FLAG: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
@@ -60,7 +61,7 @@ static MAX_TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static MAX_VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
-// TODO: tidy up, match style of files, better error handling, better logging
+// TODO: tidy up, match style of other files, better error handling, better logging
 /* ------------------------------------------------------------------------- */
 /*                               Entry point                                 */
 /* ------------------------------------------------------------------------- */

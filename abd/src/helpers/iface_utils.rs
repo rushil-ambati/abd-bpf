@@ -1,8 +1,8 @@
+use std::process::Command;
+
 use abd_common::NodeInfo;
 use anyhow::Result;
 use network_interface::NetworkInterface;
-use std::process::Command;
-
 
 pub(crate) fn get_iface_info(
     ifaces: &Vec<NetworkInterface>,

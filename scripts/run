@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Run from project root
+cd "$(dirname "$0")/.."
+
 NUM_NODES=3
 DEBUG=0
 WAIT_FOR_SERVICES=0

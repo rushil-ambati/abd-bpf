@@ -1,10 +1,12 @@
-use anyhow::Context as _;
-use aya::programs::{Xdp, XdpFlags};
-use aya::EbpfLoader;
-use clap::Parser;
-use log::info;
-use log::{debug, warn};
 use std::env;
+
+use anyhow::Context as _;
+use aya::{
+    programs::{Xdp, XdpFlags},
+    EbpfLoader,
+};
+use clap::Parser;
+use log::{debug, info, warn};
 use tokio::signal;
 
 /// An XDP program that passes all packets to the kernel

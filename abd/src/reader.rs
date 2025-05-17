@@ -1,6 +1,8 @@
 use abd::helpers::map_utils::populate_nodes_map;
-use aya::programs::{tc, SchedClassifier, TcAttachType};
-use aya::EbpfLoader;
+use aya::{
+    programs::{tc, SchedClassifier, TcAttachType},
+    EbpfLoader,
+};
 use clap::Parser;
 use log::{debug, info, logger, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};

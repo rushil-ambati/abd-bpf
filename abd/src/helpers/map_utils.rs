@@ -1,5 +1,4 @@
-use abd_common::{NodeInfo, ABD_WRITER_ID};
-use abd_common::{ABD_NODE_IFACE_PREFIX, ABD_WRITER_IFACE_NAME};
+use abd_common::{NodeInfo, ABD_NODE_IFACE_PREFIX, ABD_WRITER_ID, ABD_WRITER_IFACE_NAME};
 use anyhow::Result;
 use aya::maps::{Array, Map};
 use network_interface::NetworkInterface;

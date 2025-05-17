@@ -1,33 +1,99 @@
 # abd-bpf
 
-## Prerequisites
+An implementation of the Attiya, Bar-Noy, Dolev (ABD) distributed algorithm utilising the [eBPF](https://ebpf.io/) technology with the [Aya](https://aya-rs.dev/) framework to fully offload all logic to kernel space.
 
-1. stable rust toolchains: `rustup toolchain install stable`
-1. nightly rust toolchains: `rustup toolchain install nightly --component rust-src`
-1. (if cross-compiling) rustup target: `rustup target add ${ARCH}-unknown-linux-musl`
-1. (if cross-compiling) LLVM: (e.g.) `brew install llvm` (on macOS)
-1. (if cross-compiling) C toolchain: (e.g.) [`brew install filosottile/musl-cross/musl-cross`](https://github.com/FiloSottile/homebrew-musl-cross) (on macOS)
-1. bpf-linker: `cargo install bpf-linker` (`--no-default-features` on macOS)
-
-## Build & Run
-
-Use `cargo build`, `cargo check`, etc. as normal. Run your program with:
+## Project Structure
 
 ```shell
-cargo run --release --config 'target."cfg(all())".runner="sudo -E"'
+abd-bpf/
+├── abd/                    # Userspace loaders
+├── abd-common/             # Common data types, structs, and constants
+├── abd-ebpf/               # eBPF programs implementing ABD logic
+├── client/                 # CLI for interacting with ABD nodes
+├── tools/                  # Testing utilities and environment setup scripts
+├── scripts/                # Helper scripts
 ```
 
-Cargo build scripts are used to automatically build the eBPF correctly and include it in the
-program.
+## Getting Started
 
-## Cross-compiling on macOS
+### Prerequisites
 
-Cross compilation should work on both Intel and Apple Silicon Macs.
+Ensure you have the following dependencies installed:
+
+* **Rust toolchains**:
+
+  ```shell
+  rustup toolchain install stable
+  rustup toolchain install nightly --component rust-src
+  ```
+
+* **bpf-linker**:
+
+  ```shell
+  cargo install bpf-linker
+  ```
+
+* **Cross-compiling dependencies** *(Optional, macOS example)*:
+
+  ```shell
+  brew install llvm
+  brew install filosottile/musl-cross/musl-cross
+  rustup target add x86_64-unknown-linux-musl
+  ```
+
+### Build and Run
+
+Build the project using Cargo:
 
 ```shell
-CC=${ARCH}-linux-musl-gcc cargo build --package abd --release \
-  --target=${ARCH}-unknown-linux-musl \
-  --config=target.${ARCH}-unknown-linux-musl.linker=\"${ARCH}-linux-musl-gcc\"
+cargo build --release
 ```
-The cross-compiled program `target/${ARCH}-unknown-linux-musl/release/abd` can be
-copied to a Linux server or VM and run there.
+
+Run using the provided script:
+
+```shell
+scripts/run [-s NUM_NODES] [-d] [-w]
+```
+
+* `-s`: Number of replica nodes (default: 3)
+* `-d`: Debug build (optional)
+* `-w`: Wait for services after client operations (optional)
+
+Example:
+
+```shell
+scripts/run -s 5
+```
+
+### Cleanup
+
+To clean up the environment, run:
+
+```shell
+scripts/cleanup [-a]
+```
+
+* `-a`: Also teardown all test environments
+
+## ABD Algorithm Summary
+
+The ABD algorithm provides distributed fault tolerance via replicated storage. Nodes maintain a local value and a numerical "tag" (which acts as a virtual timestamp) to resolve conflicts and order updates. Additionally, counters are used throughout to distinguish messages relating to a particular request.
+
+* **Writer**:
+
+  * Increment tag and broadcast `(value, tag)` to servers
+  * Wait for acknowledgment from a majority
+
+* **Reader**:
+
+  * Phase 1: Query servers for their `(value, tag)` pairs
+  * Choose the maximum tag and its associated value
+  * Phase 2: Propagate the chosen `(value, tag)` to servers
+  * Wait for acknowledgments from a majority
+
+* **Server**:
+
+  * Respond to reads with local `(value, tag)`
+  * Update local `(value, tag)` if an incoming write has a higher tag
+
+Detailed explanation: [ABD Algorithm](https://cs.neea.dev/distributed/abd/)

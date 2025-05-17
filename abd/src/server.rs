@@ -1,11 +1,14 @@
+use std::env;
+
 use abd::helpers::map_utils::populate_nodes_map;
 use anyhow::Context;
-use aya::programs::{Xdp, XdpFlags};
-use aya::EbpfLoader;
+use aya::{
+    programs::{Xdp, XdpFlags},
+    EbpfLoader,
+};
 use clap::Parser;
 use log::{debug, info, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
-use std::env;
 use tokio::signal;
 
 /// An XDP program which implements an ABD server
