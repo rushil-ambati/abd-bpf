@@ -5,7 +5,7 @@ use anyhow::Result;
 use network_interface::NetworkInterface;
 
 pub(crate) fn get_iface_info(
-    ifaces: &Vec<NetworkInterface>,
+    ifaces: &[NetworkInterface],
     netns_name: &str,
 ) -> Result<NodeInfo, anyhow::Error> {
     let iface = ifaces

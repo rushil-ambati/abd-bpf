@@ -2,10 +2,7 @@
 #![no_main]
 
 use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT};
-use abd_ebpf::helpers::{
-    common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket},
-    xdp::{set_eth_dst_addr, swap_eth_addrs, swap_ipv4_addrs, swap_udp_ports},
-};
+use abd_ebpf::helpers::common::{calculate_udp_csum_update, parse_abd_packet, AbdPacket};
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS, XDP_REDIRECT},
     helpers::gen::bpf_redirect,
@@ -226,12 +223,13 @@ fn finish_and_redirect(
 ) -> Result<u32, ()> {
     let _ = udph;
     // swap UDP ports (writer expects reply on ABD_UDP_PORT)
-    swap_udp_ports(udph);
+    core::mem::swap(&mut udph.source, &mut udph.dest);
 
     // swap IPs + MACs so that writer/reader becomes dst
-    swap_ipv4_addrs(iph);
-    swap_eth_addrs(eth);
-    set_eth_dst_addr(eth, &dest.mac);
+    core::mem::swap(&mut iph.src_addr, &mut iph.dst_addr);
+    // swap_eth_addrs(eth);
+    core::mem::swap(&mut eth.src_addr, &mut eth.dst_addr);
+    eth.dst_addr.copy_from_slice(&dest.mac);
 
     let act = unsafe { bpf_redirect(dest.ifindex, 0) } as u32;
     if act != XDP_REDIRECT {

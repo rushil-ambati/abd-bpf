@@ -86,13 +86,13 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Res
     let msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(slice) };
 
     // Check the magic number
-    let magic = (*msg)._magic;
+    let magic = msg._magic;
     if magic != ABD_MAGIC {
         return Err(());
     }
 
     // Check the sender ID
-    let sender = (*msg).sender;
+    let sender = msg.sender;
     if sender > num_nodes {
         error!(ctx, "Invalid sender ID: {}", sender.to_native());
         return Err(());
@@ -142,7 +142,8 @@ pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
 pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> Result<*mut T, ()> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = size_of::<T>();
+    let len = core::mem::size_of::<T>();
+
     if start + offset + len > end {
         return Err(());
     }
@@ -157,5 +158,5 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
             csum = (csum & 0xffff) + (csum >> 16);
         }
     }
-    return !(csum as u16);
+    !(csum as u16)
 }

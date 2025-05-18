@@ -48,11 +48,10 @@ pub fn set_udp_dst_port(ctx: &TcContext, port: u16) -> Result<(), c_long> {
 /// and updates the checksums accordingly.
 /// `port` is assumed to be in host byte order (little-endian).
 fn update_udp_port(ctx: &TcContext, offset: usize, port: u16) -> Result<(), c_long> {
-    let old_port_ptr: *const u16 =
-        ptr_at::<TcContext, u16>(ctx, offset as usize).map_err(|_| {
-            error!(ctx, "failed to get old port pointer");
-            -1
-        })?;
+    let old_port_ptr: *const u16 = ptr_at::<TcContext, u16>(ctx, offset).map_err(|_| {
+        error!(ctx, "failed to get old port pointer");
+        -1
+    })?;
     let old_port = unsafe { *old_port_ptr };
     let new_port = port.to_be();
 
@@ -85,7 +84,7 @@ pub fn set_ipv4_dst_addr(ctx: &TcContext, ip: Ipv4Addr) -> Result<(), c_long> {
 /// Overwrites the IPv4 address in the packet header at the given offset
 /// and updates the checksums accordingly. This function assumes the packet contains a UDP header.
 fn set_ipv4_addr(ctx: &TcContext, offset: usize, ip: Ipv4Addr) -> Result<(), c_long> {
-    let old_ip_ptr: *const u32 = ptr_at::<TcContext, u32>(ctx, offset as usize).map_err(|_| {
+    let old_ip_ptr: *const u32 = ptr_at::<TcContext, u32>(ctx, offset).map_err(|_| {
         error!(ctx, "failed to get old IP pointer");
         -1
     })?;
