@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use abd_ebpf::helpers::common::{ptr_at, BpfResult};
+use abd_ebpf::utils::common::{ptr_at, BpfResult};
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_PASS},
     macros::xdp,

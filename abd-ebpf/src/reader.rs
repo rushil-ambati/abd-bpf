@@ -2,7 +2,7 @@
 #![no_main]
 
 use abd_common::{AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT};
-use abd_ebpf::helpers::{
+use abd_ebpf::utils::{
     common::{
         map_get_or_default, map_increment, map_insert, parse_abd_packet, read_global,
         update_abd_msg_field, AbdPacket, BpfResult,
