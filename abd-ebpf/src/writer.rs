@@ -54,32 +54,33 @@ static WRITE_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
+#[allow(clippy::needless_pass_by_value)]
 #[classifier]
 pub fn writer(ctx: TcContext) -> i32 {
-    match try_writer(ctx) {
+    match try_writer(&ctx) {
         Ok(act) => act,
-        Err(act) => act as i32,
+        Err(act) => i32::try_from(act).unwrap_or(TC_ACT_SHOT),
     }
 }
 
-fn try_writer(ctx: TcContext) -> BpfResult<i32> {
-    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
+    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
     if num_nodes == 0 {
-        error!(&ctx, "NUM_NODES is not set");
+        error!(ctx, "NUM_NODES is not set");
         return Err(TC_ACT_SHOT.into());
     }
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     if my_id != ABD_WRITER_ID {
-        error!(&ctx, "NODE_ID is not set");
+        error!(ctx, "NODE_ID is not set");
         return Err(TC_ACT_SHOT.into());
     }
 
-    let pkt = parse_abd_packet(&ctx, ABD_UDP_PORT, num_nodes)?;
+    let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
 
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|_| {
+    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
         error!(
-            &ctx,
+            ctx,
             "Invalid message type {} from {}",
             msg_type,
             pkt.msg.sender.to_native()
@@ -87,11 +88,11 @@ fn try_writer(ctx: TcContext) -> BpfResult<i32> {
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
-        AbdMsgType::Write => handle_client_write(&ctx, pkt),
-        AbdMsgType::WriteAck => handle_write_ack(&ctx, pkt),
+        AbdMsgType::Write => handle_client_write(ctx, pkt),
+        AbdMsgType::WriteAck => handle_write_ack(ctx, pkt),
         _ => {
             warn!(
-                &ctx,
+                ctx,
                 "Received unexpected message type: {} from @{}, dropping...",
                 msg_type,
                 pkt.msg.sender.to_native()
@@ -122,12 +123,12 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     })?;
 
     // remember client
-    let client = ClientInfo {
-        ipv4: Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
-        ifindex: (unsafe { *ctx.skb.skb }).ingress_ifindex,
-        port: u16::from_be(pkt.udph.source),
-        mac: pkt.eth.src_addr,
-    };
+    let client = ClientInfo::new(
+        (unsafe { *ctx.skb.skb }).ingress_ifindex,
+        Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
+        pkt.eth.src_addr,
+        u16::from_be(pkt.udph.source),
+    );
     CLIENT_INFO.insert(&0, &client, 0).map_err(|_| {
         error!(ctx, "Failed to store client info");
         TC_ACT_SHOT
@@ -150,7 +151,7 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // set ABD message values in-place
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -163,7 +164,7 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     pkt.udph.check = udp_csum;
 
     broadcast_to_nodes(ctx)
-        .map(|_| TC_ACT_STOLEN)
+        .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast WRITE request"))
 }
 
@@ -193,11 +194,11 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     debug!(ctx, "Received W-ACK from @{}", pkt.msg.sender.to_native());
 
     // bump ack counter
-    let acks = incr_ack(&ctx)?;
+    let acks = incr_ack(ctx)?;
 
     // check if we have enough ACKs
-    let majority = ((unsafe { core::ptr::read_volatile(&NUM_NODES) }) >> 1) + 1;
-    if acks < (majority as u64) {
+    let majority = ((unsafe { core::ptr::read_volatile(&raw const NUM_NODES) }) >> 1) + 1;
+    if acks < u64::from(majority) {
         info!(
             ctx,
             "Got {} WRITE-ACK(s), waiting for majority ({})...", acks, majority
@@ -217,7 +218,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         TC_ACT_SHOT
     })?;
 
-    send_write_ack_to_client(&ctx, pkt)
+    send_write_ack_to_client(ctx, pkt)
         .inspect_err(|_| error!(ctx, "Failed to redirect W-ACK to client"))
 }
 
@@ -237,7 +238,7 @@ fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
     })?;
 
     // set L3/L2 source addresses as our own
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     let me = NODES.get(my_id).ok_or_else(|| {
         error!(ctx, "Failed to get info for self (@{})", my_id);
         TC_ACT_SHOT
@@ -247,7 +248,7 @@ fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
     store(ctx, ETH_SRC_OFF, &me.mac, 0)
         .inspect_err(|e| error!(ctx, "Failed to update source MAC address: {}", *e))?;
 
-    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
     for i in 1..=num_nodes {
         let peer = NODES.get(i).ok_or_else(|| {
             error!(ctx, "Failed to get info for @{}", i);
@@ -281,7 +282,7 @@ fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // set ABD message values in-place (clearing internal fields)
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -293,7 +294,7 @@ fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     pkt.udph.check = udp_csum;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     let me = NODES.get(my_id).ok_or_else(|| {
         error!(ctx, "Failed to get info for self (@{})", my_id);
         TC_ACT_SHOT
@@ -319,22 +320,22 @@ fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     store(ctx, ETH_DST_OFF, &client.mac, 0)
         .inspect_err(|e| error!(ctx, "Failed to update the destination MAC address: {}", *e))?;
 
-    let ret = unsafe { bpf_redirect(client.ifindex, 0) } as i32;
-    match ret {
-        TC_ACT_REDIRECT => {
-            info!(ctx, "Sent W-ACK to client ({})", client.ipv4);
-            Ok(ret)
-        }
-        _ => {
-            error!(ctx, "bpf_redirect failed");
-            Err(ret.into())
-        }
+    let ret = i32::try_from(unsafe { bpf_redirect(client.ifindex, 0) }).map_err(|_| {
+        error!(ctx, "bpf_redirect failed");
+        TC_ACT_SHOT
+    })?;
+    if ret == TC_ACT_REDIRECT {
+        info!(ctx, "Sent W-ACK to client ({})", client.ipv4);
+        Ok(ret)
+    } else {
+        error!(ctx, "bpf_redirect failed");
+        Err(ret.into())
     }
 }
 
 #[inline]
 fn active() -> bool {
-    unsafe { ACTIVE.get(&0) }.map_or(false, |v| *v)
+    unsafe { ACTIVE.get(&0) }.is_some_and(|v| *v)
 }
 
 #[inline]

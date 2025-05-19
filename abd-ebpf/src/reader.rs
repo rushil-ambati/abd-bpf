@@ -56,32 +56,33 @@ static READ_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 #[map]
 static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
 
+#[allow(clippy::needless_pass_by_value)]
 #[classifier]
 pub fn reader(ctx: TcContext) -> i32 {
-    match try_reader(ctx) {
+    match try_reader(&ctx) {
         Ok(act) => act,
-        Err(act) => act as i32,
+        Err(act) => i32::try_from(act).unwrap_or(TC_ACT_SHOT),
     }
 }
 
-fn try_reader(ctx: TcContext) -> BpfResult<i32> {
-    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
+    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
     if num_nodes == 0 {
-        error!(&ctx, "Number of nodes is not set");
+        error!(ctx, "Number of nodes is not set");
         return Err(TC_ACT_SHOT.into());
     }
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     if my_id == 0 {
-        error!(&ctx, "Node ID is not set");
+        error!(ctx, "Node ID is not set");
         return Err(TC_ACT_SHOT.into());
     }
 
-    let pkt = parse_abd_packet(&ctx, ABD_UDP_PORT, num_nodes)?;
+    let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
 
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|_| {
+    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
         error!(
-            &ctx,
+            ctx,
             "Invalid message type {} from {}",
             msg_type,
             pkt.msg.sender.to_native()
@@ -89,12 +90,12 @@ fn try_reader(ctx: TcContext) -> BpfResult<i32> {
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
-        AbdMsgType::Read => handle_client_read(&ctx, pkt),
-        AbdMsgType::ReadAck => handle_read_ack(&ctx, pkt),
-        AbdMsgType::WriteAck => handle_write_ack(&ctx, pkt),
+        AbdMsgType::Read => handle_client_read(ctx, pkt),
+        AbdMsgType::ReadAck => handle_read_ack(ctx, pkt),
+        AbdMsgType::WriteAck => handle_write_ack(ctx, pkt),
         _ => {
             warn!(
-                &ctx,
+                ctx,
                 "@{}: Received unexpected message type {} from @{}, dropping...",
                 my_id,
                 msg_type,
@@ -109,7 +110,7 @@ fn try_reader(ctx: TcContext) -> BpfResult<i32> {
 fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     info!(ctx, "READ from client");
 
-    if is_not_status(0)? {
+    if is_not_status(0) {
         return Ok(TC_ACT_SHOT);
     }
 
@@ -131,12 +132,12 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     })?;
 
     // remember client
-    let client = ClientInfo {
-        ipv4: Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
-        ifindex: (unsafe { *ctx.skb.skb }).ingress_ifindex,
-        port: u16::from_be(pkt.udph.source),
-        mac: pkt.eth.src_addr,
-    };
+    let client = ClientInfo::new(
+        (unsafe { *ctx.skb.skb }).ingress_ifindex,
+        Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
+        pkt.eth.src_addr,
+        u16::from_be(pkt.udph.source),
+    );
     CLIENT_INFO.insert(&0, &client, 0).map_err(|_| {
         error!(ctx, "Failed to store client info");
         TC_ACT_SHOT
@@ -152,7 +153,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     munge!(let ArchivedAbdMsg { mut sender, mut counter, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -162,7 +163,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     pkt.udph.check = udp_csum;
 
     broadcast_to_nodes(ctx)
-        .map(|_| TC_ACT_STOLEN)
+        .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
 }
 
@@ -170,7 +171,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, mut counter, .. } = pkt.msg);
 
-    if is_not_status(1)? {
+    if is_not_status(1) {
         debug!(
             ctx,
             "Dropping R-ACK from @{} (tag={} value={}) - not in Phase-1",
@@ -202,7 +203,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     // bump ack counter
-    let acks = incr_acks(&ctx)?;
+    let acks = incr_acks(ctx)?;
 
     // update max tag & value
     let max_tag = *unsafe { MAX_TAG.get(&0) }.unwrap_or(&0);
@@ -213,8 +214,8 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     }
 
     // check if we have enough ACKs
-    let majority = (unsafe { core::ptr::read_volatile(&NUM_NODES) } >> 1) + 1;
-    if acks < (majority as u64) {
+    let majority = (unsafe { core::ptr::read_volatile(&raw const NUM_NODES) } >> 1) + 1;
+    if acks < u64::from(majority) {
         info!(
             ctx,
             "Phase-1: got {} R-ACK(s), waiting for majority ({})...", acks, majority
@@ -245,7 +246,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     let mut csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut csum)?;
     *sender = my_id.into();
 
@@ -269,13 +270,13 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     broadcast_to_nodes(ctx)
-        .map(|_| TC_ACT_STOLEN)
+        .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
 }
 
 /// Handle a W-ACK from a replica (Phase-2)
 fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    if is_not_status(2)? {
+    if is_not_status(2) {
         return Ok(TC_ACT_SHOT);
     }
 
@@ -297,8 +298,8 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     let acks = incr_acks(ctx)?;
-    let majority = (unsafe { core::ptr::read_volatile(&NUM_NODES) } >> 1) + 1;
-    if acks < (majority as u64) {
+    let majority = (unsafe { core::ptr::read_volatile(&raw const NUM_NODES) } >> 1) + 1;
+    if acks < u64::from(majority) {
         info!(
             ctx,
             "Phase-2: got {} W-ACK(s), waiting for majority ({})...", acks, majority
@@ -325,6 +326,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 }
 
 /// Broadcast the current packet to every replica
+#[allow(clippy::inline_always)]
 #[inline(always)]
 fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
     // servers must reply on our UDP port
@@ -340,7 +342,7 @@ fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
     })?;
 
     // set L3/L2 source addresses as our own
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     let me = NODES.get(my_id).ok_or_else(|| {
         error!(ctx, "Failed to get info for self (@{})", my_id);
         TC_ACT_SHOT
@@ -350,7 +352,7 @@ fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
     store(ctx, ETH_SRC_OFF, &me.mac, 0)
         .inspect_err(|e| error!(ctx, "Failed to update source MAC address: {}", *e))?;
 
-    let num_nodes = unsafe { core::ptr::read_volatile(&NUM_NODES) };
+    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
     for i in 1..=num_nodes {
         let peer = NODES.get(i).ok_or_else(|| {
             error!(ctx, "Failed to get info for @{}", i);
@@ -387,7 +389,7 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // set ABD message values in-place
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&NODE_ID) };
+    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
     calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -405,10 +407,11 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     pkt.udph.check = udp_csum;
 
-    let me = unsafe { NODES.get(core::ptr::read_volatile(&NODE_ID)) }.ok_or_else(|| {
-        error!(ctx, "Failed to get info for self (@{})", my_id);
-        TC_ACT_SHOT
-    })?;
+    let me =
+        unsafe { NODES.get(core::ptr::read_volatile(&raw const NODE_ID)) }.ok_or_else(|| {
+            error!(ctx, "Failed to get info for self (@{})", my_id);
+            TC_ACT_SHOT
+        })?;
     let client = unsafe { CLIENT_INFO.get(&0) }.ok_or_else(|| {
         error!(ctx, "Failed to get client info");
         TC_ACT_SHOT
@@ -430,24 +433,24 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     store(ctx, ETH_DST_OFF, &client.mac, 0)
         .inspect_err(|e| error!(ctx, "Failed to update the destination MAC address: {}", *e))?;
 
-    let ret = unsafe { bpf_redirect(client.ifindex, 0) } as i32;
-    match ret {
-        TC_ACT_REDIRECT => {
-            info!(ctx, "Sent R-ACK to client ({})", client.ipv4);
-            Ok(ret)
-        }
-        _ => {
-            error!(ctx, "bpf_redirect failed");
-            Err(ret.into())
-        }
+    let ret = i32::try_from(unsafe { bpf_redirect(client.ifindex, 0) }).map_err(|_| {
+        error!(ctx, "bpf_redirect failed");
+        TC_ACT_SHOT
+    })?;
+    if ret == TC_ACT_REDIRECT {
+        info!(ctx, "Sent R-ACK to client ({})", client.ipv4);
+        Ok(ret)
+    } else {
+        error!(ctx, "bpf_redirect failed");
+        Err(ret.into())
     }
 }
 
 /// Returns true if the current status is not `want`.
 #[inline]
-fn is_not_status(want: u8) -> BpfResult<bool> {
+fn is_not_status(want: u8) -> bool {
     let status = unsafe { STATUS.get(&0) }.map_or(0, |v| *v);
-    Ok(status != want)
+    status != want
 }
 
 /// Increment the acknowledgment count, returning the new value.

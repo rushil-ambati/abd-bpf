@@ -19,7 +19,7 @@ pub(crate) fn get_iface_info(
         .iter()
         .find_map(|addr| match addr {
             network_interface::Addr::V4(v4) => Some(v4.ip),
-            _ => None,
+            network_interface::Addr::V6(_) => None,
         })
         .ok_or_else(|| anyhow::anyhow!("No IPv4 address found for {}", netns_name))?;
 
@@ -42,11 +42,7 @@ pub(crate) fn get_iface_info(
 
     let mac = parse_mac(String::from_utf8_lossy(&output.stdout).trim())?;
 
-    Ok(NodeInfo {
-        ipv4: ipv4_addr,
-        ifindex: idx,
-        mac,
-    })
+    Ok(NodeInfo::new(idx, ipv4_addr, mac))
 }
 
 fn parse_mac(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
@@ -54,9 +50,9 @@ fn parse_mac(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
         .split(':')
         .map(|h| u8::from_str_radix(h, 16))
         .collect::<Result<_, _>>()?;
-    if bytes.len() != 6 {
-        Err(anyhow::anyhow!("Invalid MAC format: {}", mac_str))
-    } else {
+    if bytes.len() == 6 {
         Ok([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]])
+    } else {
+        Err(anyhow::anyhow!("Invalid MAC format: {}", mac_str))
     }
 }

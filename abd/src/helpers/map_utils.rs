@@ -5,6 +5,7 @@ use network_interface::NetworkInterface;
 
 use super::iface_utils::get_iface_info;
 
+#[allow(clippy::missing_errors_doc)]
 pub fn populate_nodes_map(
     map: &mut Map,
     interfaces: &[NetworkInterface],
@@ -16,7 +17,7 @@ pub fn populate_nodes_map(
     array_map.set(ABD_WRITER_ID, info, 0)?;
 
     for i in 1..=num_nodes {
-        let iface_name = format!("{}{}", ABD_NODE_IFACE_PREFIX, i);
+        let iface_name = format!("{ABD_NODE_IFACE_PREFIX}{i}");
         let info = get_iface_info(interfaces, &iface_name)?;
         array_map.set(i, info, 0)?;
     }

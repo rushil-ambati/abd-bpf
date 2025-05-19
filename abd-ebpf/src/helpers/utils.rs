@@ -23,7 +23,7 @@ use super::offsets::{UDPH_OFF, UDP_PAYLOAD_OFF};
 // Alias for results from BPF functions
 pub type BpfResult<T> = Result<T, i64>;
 
-/// Anything with data & data_end pointers
+/// Anything with `data` & `data_end` pointers
 pub trait PacketBuf: EbpfContext {
     fn data(&self) -> usize;
     fn data_end(&self) -> usize;
@@ -34,11 +34,11 @@ pub trait PacketBuf: EbpfContext {
 }
 impl PacketBuf for XdpContext {
     fn data(&self) -> usize {
-        XdpContext::data(self)
+        Self::data(self)
     }
 
     fn data_end(&self) -> usize {
-        XdpContext::data_end(self)
+        Self::data_end(self)
     }
 
     const ABORT: i64 = XDP_ABORTED as i64;
@@ -47,11 +47,11 @@ impl PacketBuf for XdpContext {
 }
 impl PacketBuf for TcContext {
     fn data(&self) -> usize {
-        TcContext::data(self)
+        Self::data(self)
     }
 
     fn data_end(&self) -> usize {
-        TcContext::data_end(self)
+        Self::data_end(self)
     }
 
     const ABORT: i64 = TC_ACT_SHOT as i64;
@@ -60,6 +60,11 @@ impl PacketBuf for TcContext {
 }
 
 /// Bounds‐checked pointer into packet data
+///
+/// # Errors
+///
+/// Returns an error if the offset is out of bounds.
+/// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
 #[inline]
 pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
     let start = ctx.data();
@@ -81,6 +86,11 @@ pub struct AbdPacket<'a> {
 }
 
 /// Parse an ABD packet from a context
+///
+/// # Errors
+///
+/// If the packet is not an ABD packet, returns `C::IGNORE` (`XDP_PASS` or `TC_ACT_PIPE`).
+/// If any other error occurs during packet parsing, returns `C::ABORT` (`XDP_ABORTED` or `TC_ACT_SHOT`).
 pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> BpfResult<AbdPacket> {
     // Ethernet → must be IPv4
     let eth_ptr: *mut EthHdr = ptr_at(ctx, 0)?;
@@ -118,7 +128,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     let msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(slice) };
 
     // Check the magic number
-    let magic = msg._magic;
+    let magic = msg.magic;
     if magic != ABD_MAGIC {
         return Err(C::IGNORE);
     }
@@ -139,7 +149,11 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
 }
 
 /// Calculate the new UDP checksum after changing a field in the packet
-#[inline(always)]
+///
+/// # Errors
+///
+/// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
+#[inline]
 pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
     ctx: &C,
     field: &Seal<'_, T>,
@@ -150,13 +164,32 @@ pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
         return Ok(()); // no change
     }
 
+    let from_size = u32::try_from(size_of::<T>()).map_err(|_| {
+        error!(
+            ctx,
+            "failed to convert size of {} ({}) to u32",
+            core::any::type_name::<T>(),
+            size_of::<T>()
+        );
+        C::ABORT
+    })?;
+    let to_size = u32::try_from(size_of::<T>()).map_err(|_| {
+        error!(
+            ctx,
+            "failed to convert size of {} ({}) to u32",
+            core::any::type_name::<T>(),
+            size_of::<T>()
+        );
+        C::ABORT
+    })?;
+
     let ret = unsafe {
         bpf_csum_diff(
-            &**field as *const _ as *mut u32,
-            size_of::<T>() as u32,
-            &new_val as *const _ as *mut u32,
-            size_of::<T>() as u32,
-            !(*udp_csum as u32),
+            &raw const **field as *mut u32,
+            from_size,
+            &raw const new_val as *mut u32,
+            to_size,
+            !u32::from(*udp_csum),
         )
     };
     if ret < 0 {
@@ -167,18 +200,20 @@ pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
         return Err(C::ABORT);
     }
 
+    #[allow(clippy::cast_sign_loss)]
     let new_csum = csum_fold_helper(ret as u64);
     *udp_csum = new_csum;
     Ok(())
 }
 
 // Converts a checksum into u16
-#[inline(always)]
+#[inline]
 fn csum_fold_helper(mut csum: u64) -> u16 {
     for _i in 0..4 {
         if (csum >> 16) > 0 {
             csum = (csum & 0xffff) + (csum >> 16);
         }
     }
+    #[allow(clippy::cast_possible_truncation)]
     !(csum as u16)
 }

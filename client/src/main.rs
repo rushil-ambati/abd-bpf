@@ -1,4 +1,5 @@
 use std::{
+    fmt::Write as _,
     net::{Ipv4Addr, SocketAddrV4, UdpSocket},
     time::{Duration, Instant},
 };
@@ -86,13 +87,13 @@ fn main() -> anyhow::Result<()> {
             let mut label = format!("WRITE({})", opts.value);
 
             if opts.common.tag.is_some() {
-                label.push_str(&format!(" tag={tag}"));
+                let _ = write!(label, " tag={tag}");
             }
             if opts.common.counter.is_some() {
-                label.push_str(&format!(" counter={counter}"));
+                let _ = write!(label, " counter={counter}");
             }
             if opts.common.sender_id.is_some() {
-                label.push_str(&format!(" sender={sender_id}"));
+                let _ = write!(label, " sender={sender_id}");
             }
 
             (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
@@ -109,16 +110,16 @@ fn main() -> anyhow::Result<()> {
             let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
-                label.push_str(&format!(" tag={tag}"));
+                let _ = write!(label, " tag={tag}");
             }
             if opts.common.counter.is_some() {
-                label.push_str(&format!(" counter={counter}"));
+                let _ = write!(label, " counter={counter}");
             }
             if opts.common.sender_id.is_some() {
-                label.push_str(&format!(" sender={sender_id}"));
+                let _ = write!(label, " sender={sender_id}");
             }
             if opts.value.is_some() {
-                label.push_str(&format!(" value={value}"));
+                let _ = write!(label, " value={value}");
             }
 
             (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
@@ -165,7 +166,7 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
                 resp.sender
             );
         }
-        Err(_) => {
+        Err(()) => {
             warn!(
                 "❌  Unknown message type: {} from @{}",
                 resp.type_, resp.sender

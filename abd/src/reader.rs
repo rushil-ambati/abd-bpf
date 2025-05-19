@@ -47,9 +47,9 @@ async fn main() -> anyhow::Result<()> {
         rlim_cur: libc::RLIM_INFINITY,
         rlim_max: libc::RLIM_INFINITY,
     };
-    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &raw const rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {}", ret);
+        debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         )))?;
     if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf, logger()) {
         // This can happen if you remove all log statements from your eBPF program.
-        warn!("failed to initialize eBPF logger: {}", e);
+        warn!("failed to initialize eBPF logger: {e}");
     }
 
     // error adding clsact to the interface if it is already added is harmless
