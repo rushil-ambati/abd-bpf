@@ -9,9 +9,7 @@ user = ["aya"]
 
 [dependencies]
 aya = { workspace = true, optional = true }
-rkyv = { version = "0.8.10", default-features = false, features = [
-    "bytecheck",
-] }
+rkyv = { workspace = true }
 
 [lib]
 path = "src/lib.rs"

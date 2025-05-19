@@ -18,10 +18,10 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Send a WRITE request
+    /// Write a new value
     Write(WriteOpts),
 
-    /// Send a READ request
+    /// Read the stored value
     Read(ReadOpts),
 }
 
@@ -65,10 +65,15 @@ struct ReadOpts {
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
     let cli = Cli::parse();
     debug!("Parsed arguments: {cli:?}");
+
+    let expected_ack = match cli.command {
+        Command::Write(_) => AbdMsgType::WriteAck,
+        Command::Read(_) => AbdMsgType::ReadAck,
+    };
 
     let (server_addr, msg, label) = match cli.command {
         Command::Write(opts) => {
@@ -78,7 +83,7 @@ fn main() -> anyhow::Result<()> {
             let tag = opts.common.tag.unwrap_or(0);
 
             let msg = AbdMsg::new(sender_id, AbdMsgType::Write, tag, opts.value, counter);
-            let mut label = format!("Write({})", opts.value);
+            let mut label = format!("WRITE({})", opts.value);
 
             if opts.common.tag.is_some() {
                 label.push_str(&format!(" tag={tag}"));
@@ -101,7 +106,7 @@ fn main() -> anyhow::Result<()> {
             let value = opts.value.unwrap_or(0); // not required for read, but preserved
 
             let msg = AbdMsg::new(sender_id, AbdMsgType::Read, tag, value, counter);
-            let mut label = "Read".to_string();
+            let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
                 label.push_str(&format!(" tag={tag}"));
@@ -141,36 +146,30 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("deserialise (stage 2): {e}"))?;
     debug!("Deserialised response: {resp:?}");
 
-    report(&resp, elapsed);
+    report(&resp, elapsed, expected_ack);
     Ok(())
 }
 
-fn report(resp: &AbdMsg, elapsed: Duration) {
-    match resp.type_.try_into() {
-        Ok(msg_type @ AbdMsgType::WriteAck) => {
-            info!("✅  {msg_type:?}. Took {elapsed:?}");
+fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
+    match AbdMsgType::try_from(resp.type_) {
+        Ok(received) if received == expected => {
+            info!("✅  {received:?}, took {elapsed:?}");
             debug!(
                 "sender={} tag={} value={} counter={}",
                 resp.sender, resp.tag, resp.value, resp.counter
             );
         }
-        Ok(msg_type @ AbdMsgType::ReadAck) => {
-            info!(
-                "✅  {msg_type:?} tag={} value={}. Took {elapsed:?}",
-                resp.tag, resp.value
-            );
-            debug!(
-                "sender={} tag={} value={} counter={}",
-                resp.sender, resp.tag, resp.value, resp.counter
+        Ok(unexpected) => {
+            warn!(
+                "❌  Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
+                resp.sender
             );
         }
-        Ok(other) => warn!(
-            "❌  Unexpected message type: {other:?} from @{}",
-            resp.sender
-        ),
-        Err(_) => warn!(
-            "❌  Unknown message type: {} from @{}",
-            resp.type_, resp.sender
-        ),
+        Err(_) => {
+            warn!(
+                "❌  Unknown message type: {} from @{}",
+                resp.type_, resp.sender
+            );
+        }
     }
 }

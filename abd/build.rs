@@ -1,7 +1,7 @@
 use anyhow::{anyhow, Context as _};
 use aya_build::cargo_metadata;
 
-fn main() -> Result<(), anyhow::Error> {
+fn main() -> anyhow::Result<()> {
     let cargo_metadata::Metadata { packages, .. } = cargo_metadata::MetadataCommand::new()
         .no_deps()
         .exec()

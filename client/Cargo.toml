@@ -5,11 +5,11 @@ edition = "2021"
 
 [dependencies]
 abd-common = { path = "../abd-common" }
-rkyv = "0.8.10"
+rkyv = { workspace = true, default-features = true }
 clap = { workspace = true, default-features = true, features = ["derive"] }
-log.workspace = true
-anyhow.workspace = true
-env_logger.workspace = true
+log = { workspace = true }
+anyhow = { workspace = true }
+env_logger = { workspace = true }
 
 [[bin]]
 name = "client"

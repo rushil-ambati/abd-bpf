@@ -18,6 +18,9 @@ clap = { version = "4.5.37", default-features = false, features = ["std"] }
 env_logger = { version = "0.11.5", default-features = true }
 libc = { version = "0.2.159", default-features = false }
 log = { version = "0.4.22", default-features = false }
+rkyv = { version = "0.8.10", default-features = false, features = [
+    "bytecheck",
+] }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
 

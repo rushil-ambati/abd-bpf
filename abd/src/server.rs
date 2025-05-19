@@ -15,29 +15,35 @@ use tokio::signal;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Network interface to attach the XDP program to
-    #[arg(short, long, default_value = "eth0")]
+    /// Network interface to attach to
+    #[arg(long, default_value = "eth0")]
     iface: String,
 
-    /// ABD node ID
-    #[arg(short, long)]
-    node_id: u32,
-
-    /// Number of servers
+    /// Total number of replicas
     #[arg(long)]
     num_nodes: u32,
+
+    /// This node’s id (1‥N)
+    #[arg(long)]
+    node_id: u32,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
-    let args = Args::parse();
     let Args {
         iface,
         node_id,
         num_nodes,
-    } = args;
+    } = Args::parse();
+
+    // Check that the node_id is valid
+    if node_id == 0 || node_id > num_nodes {
+        return Err(anyhow::anyhow!(
+            "node_id must be between 1 and num_nodes (inclusive)"
+        ));
+    }
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -56,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
         .set_global("NUM_NODES", &num_nodes, true)
-        .set_global("SELF_ID", &node_id, true)
+        .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/server"

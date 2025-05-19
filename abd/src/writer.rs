@@ -13,21 +13,20 @@ use tokio::signal;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Name of the network interface to attach the XDP program to
+    /// Network interface to attach to
     #[arg(long, default_value = "eth0")]
     iface: String,
 
-    /// Number of servers
+    /// Total number of replicas
     #[arg(long)]
     num_nodes: u32,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    env_logger::builder().format_timestamp(None).init();
 
-    let args = Args::parse();
-    let Args { iface, num_nodes } = args;
+    let Args { iface, num_nodes } = Args::parse();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -45,8 +44,8 @@ async fn main() -> anyhow::Result<()> {
     // like to specify the eBPF program at runtime rather than at compile-time, you can
     // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
-        .set_global("SELF_ID", &ABD_WRITER_ID, true) // not used in writer
         .set_global("NUM_NODES", &num_nodes, true)
+        .set_global("NODE_ID", &ABD_WRITER_ID, true) // not used in writer
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/writer"
