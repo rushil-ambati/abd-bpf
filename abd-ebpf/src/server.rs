@@ -1,8 +1,11 @@
 #![no_std]
 #![no_main]
 
-use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT};
-use abd_ebpf::helpers::utils::{calculate_udp_csum_update, parse_abd_packet, AbdPacket, BpfResult};
+use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT};
+use abd_ebpf::helpers::common::{
+    map_get_or_default, map_insert, parse_abd_packet, read_global, update_abd_msg_field, AbdPacket,
+    BpfResult,
+};
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
     helpers::gen::bpf_redirect,
@@ -24,7 +27,7 @@ static NODE_ID: u32 = 0;
 
 /// Node information - populated from userspace
 #[map]
-static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Current tag (timestamp) for the stored value
 #[map]
@@ -36,7 +39,7 @@ static VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
 /// Per-node request counter
 #[map]
-static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(ABD_NODE_MAX, 0);
+static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Small struct for “where to send the reply”
 #[derive(Clone, Copy)]
@@ -55,12 +58,12 @@ pub fn server(ctx: XdpContext) -> u32 {
 }
 
 fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
-    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
+    let num_nodes = unsafe { read_global(&NUM_NODES) };
     if num_nodes == 0 {
         error!(ctx, "Number of nodes is not set");
         return Err(XDP_ABORTED.into());
     }
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
+    let my_id = unsafe { read_global(&NODE_ID) };
     if my_id == 0 {
         error!(ctx, "Node ID is not set");
         return Err(XDP_ABORTED.into());
@@ -68,14 +71,10 @@ fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
 
     let pkt = parse_abd_packet(ctx, ABD_SERVER_UDP_PORT, num_nodes)?;
 
+    let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
     let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
-        error!(
-            ctx,
-            "Invalid message type {} from @{}",
-            msg_type,
-            pkt.msg.sender.to_native()
-        );
+        error!(ctx, "Invalid message type {} from @{}", msg_type, sender);
         XDP_ABORTED
     })?;
     match parsed_msg_type {
@@ -84,9 +83,7 @@ fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
         _ => {
             warn!(
                 ctx,
-                "Received unexpected message type {} from @{}, dropping...",
-                pkt.msg.type_.to_native(),
-                pkt.msg.sender.to_native()
+                "Received unexpected message type {} from @{}, dropping...", msg_type, sender
             );
             Ok(XDP_DROP)
         }
@@ -94,120 +91,125 @@ fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
 }
 
 fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, counter, .. } = pkt.msg);
+    let sender = pkt.msg.sender.to_native();
+    let counter = pkt.msg.counter.to_native();
 
-    let sender_id = sender.to_native();
-    info!(ctx, "READ from @{}", sender_id);
+    info!(ctx, "READ from @{}", sender);
+    update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    // counter freshness check
-    let counter = counter.to_native();
-    let sender_counter = *unsafe { COUNTERS.get(&sender.to_native()) }.unwrap_or(&0);
-    if counter <= sender_counter {
-        warn!(
-            ctx,
-            "Drop READ from @{} - counter ({}) must be > {}", sender_id, counter, sender_counter
-        );
-        return Ok(XDP_DROP);
-    }
+    let tag = map_get_or_default(&TAG, &0);
+    let value = map_get_or_default(&VALUE, &0);
 
-    // update the counter for the sender
-    COUNTERS
-        .insert(&sender.to_native(), &counter, 0)
-        .map_err(|_| {
-            error!(ctx, "Failed to insert counter for @{}", sender_id);
-            XDP_ABORTED
-        })?;
-
-    let dest = lookup_dest(ctx, sender_id)?;
-
-    let mut udp_csum = pkt.udph.check;
-
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
-
-    calculate_udp_csum_update(ctx, &type_, AbdMsgType::ReadAck.into(), &mut udp_csum)?;
-    *type_ = AbdMsgType::ReadAck.into();
-
-    let stored_tag = unsafe { TAG.get(&0) }.unwrap_or(&0);
-    calculate_udp_csum_update(ctx, &tag, stored_tag.into(), &mut udp_csum)?;
-    *tag = stored_tag.into();
-
-    let stored_value = unsafe { VALUE.get(&0) }.unwrap_or(&0);
-    calculate_udp_csum_update(ctx, &value, stored_value.into(), &mut udp_csum)?;
-    *value = stored_value.into();
-
-    pkt.udph.check = udp_csum;
-
-    finish_and_redirect(ctx, pkt.udph, pkt.iph, pkt.eth, dest)
+    construct_and_send_ack(
+        ctx,
+        pkt,
+        AbdMsgType::ReadAck,
+        Some(tag),
+        Some(value),
+        lookup_dest(ctx, sender)?,
+    )
 }
 
 fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, tag, value, counter, .. } = pkt.msg);
+    let sender = pkt.msg.sender.to_native();
+    let counter = pkt.msg.counter.to_native();
 
-    let sender_id = sender.to_native();
+    info!(ctx, "WRITE from @{}", sender);
+    update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    info!(ctx, "Received WRITE request from @{}", sender_id,);
+    let tag = pkt.msg.tag.to_native();
+    let value = pkt.msg.value.to_native();
 
-    let counter = (*counter).to_native();
-    let counter_for_sender = *unsafe { COUNTERS.get(&sender_id) }.unwrap_or(&0);
-    if counter <= counter_for_sender {
+    store_tag_and_value_if_newer(ctx, tag, value)?;
+
+    construct_and_send_ack(
+        ctx,
+        pkt,
+        AbdMsgType::WriteAck,
+        None,
+        None,
+        lookup_dest(ctx, sender)?,
+    )
+}
+
+/// Updates the sender counter if the incoming counter is newer
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn update_sender_counter_if_newer(ctx: &XdpContext, sender: u32, counter: u64) -> BpfResult<()> {
+    let sender_counter = map_get_or_default(&COUNTERS, &sender);
+    if counter <= sender_counter {
         warn!(
             ctx,
-            "Drop WRITE request from @{}: {} (counter) <= {} (sender counter)",
-            sender_id,
-            counter,
-            counter_for_sender
+            "Counter {} not fresher than {} for @{}", counter, sender_counter, sender
         );
-        return Ok(XDP_DROP);
+        return Err(XDP_DROP.into());
     }
+    map_insert(ctx, &COUNTERS, &sender, &counter)
+}
 
-    // update the counter for the sender
-    COUNTERS.insert(&sender_id, &counter, 0).map_err(|_| {
-        error!(ctx, "Failed to insert counter for @{}", sender_id);
-        XDP_ABORTED
-    })?;
-
-    let stored_tag = unsafe { TAG.get(&0) }.unwrap_or(&0);
-
-    if *tag > *stored_tag {
-        TAG.insert(&0, &tag.to_native(), 0).map_err(|_| {
-            error!(ctx, "Failed to insert tag {}", (*tag).to_native());
-            XDP_ABORTED
-        })?;
-        VALUE.insert(&0, &value.to_native(), 0).map_err(|_| {
-            error!(ctx, "Failed to insert value {}", (*value).to_native());
-            XDP_ABORTED
-        })?;
+/// Stores new tag and value if tag is newer
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn store_tag_and_value_if_newer(ctx: &XdpContext, tag: u64, value: u64) -> BpfResult<()> {
+    let current_tag = map_get_or_default(&TAG, &0);
+    if tag > current_tag {
+        map_insert(ctx, &TAG, &0, &tag)?;
+        map_insert(ctx, &VALUE, &0, &value)?;
     } else {
         debug!(
             ctx,
-            "Not updating tag: {} (new) <= {} (current)",
-            (*tag).to_native(),
-            *stored_tag
+            "Tag {} not newer than current {}, skipping update", tag, current_tag
         );
     }
+    Ok(())
+}
 
-    // craft response
-    let dest = lookup_dest(ctx, sender_id)?;
+/// Builds a response packet by updating fields and checksum
+#[allow(clippy::inline_always)]
+#[inline(always)]
+fn construct_and_send_ack(
+    ctx: &XdpContext,
+    pkt: AbdPacket,
+    new_type: AbdMsgType,
+    new_tag: Option<u64>,
+    new_value: Option<u64>,
+    dest: Dest,
+) -> BpfResult<u32> {
+    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, mut value, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
+    let my_id = unsafe { read_global(&NODE_ID) };
+    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut type_, new_type.into(), &mut udp_csum)?;
 
-    calculate_udp_csum_update(ctx, &type_, AbdMsgType::WriteAck.into(), &mut udp_csum)?;
-    *type_ = AbdMsgType::WriteAck.into();
+    if let Some(new_tag) = new_tag {
+        update_abd_msg_field(ctx, &mut tag, new_tag.into(), &mut udp_csum)?;
+    }
+    if let Some(new_value) = new_value {
+        update_abd_msg_field(ctx, &mut value, new_value.into(), &mut udp_csum)?;
+    }
 
     pkt.udph.check = udp_csum;
+    redirect_to_dest(ctx, pkt.udph, pkt.iph, pkt.eth, dest)
+}
 
-    finish_and_redirect(ctx, pkt.udph, pkt.iph, pkt.eth, dest)
+/// Get the MAC and ifindex of the response recipient
+#[inline]
+fn lookup_dest(ctx: &XdpContext, sender_id: u32) -> BpfResult<Dest> {
+    let node = NODES.get(sender_id).ok_or_else(|| {
+        error!(ctx, "Failed to get node info for @{}", sender_id);
+        XDP_ABORTED
+    })?;
+    Ok(Dest {
+        mac: node.mac,
+        ifindex: node.ifindex,
+    })
 }
 
 /// Swap UDP ports, IPs, and MACs, then redirect to the destination
 #[allow(clippy::inline_always)]
 #[inline(always)]
-fn finish_and_redirect(
+fn redirect_to_dest(
     ctx: &XdpContext,
     udph: &mut UdpHdr,
     iph: &mut Ipv4Hdr,
@@ -240,19 +242,6 @@ fn finish_and_redirect(
         error!(ctx, "bpf_redirect failed");
         Err(ret.into())
     }
-}
-
-/// Get the MAC and ifindex of the response recipient
-#[inline]
-fn lookup_dest(ctx: &XdpContext, sender_id: u32) -> BpfResult<Dest> {
-    let node = NODES.get(sender_id).ok_or_else(|| {
-        error!(ctx, "Failed to get node info for @{}", sender_id);
-        XDP_ABORTED
-    })?;
-    Ok(Dest {
-        mac: node.mac,
-        ifindex: node.ifindex,
-    })
 }
 
 #[cfg(not(test))]

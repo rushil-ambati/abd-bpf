@@ -9,26 +9,26 @@ use core::net::Ipv4Addr;
 
 use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
 
-/// Maximum number of nodes supported in the ABD protocol.
-pub const ABD_NODE_MAX: u32 = 16;
-
 /// Prefix for network interface names assigned to ABD nodes.
-pub const ABD_NODE_IFACE_PREFIX: &str = "node";
+pub const ABD_IFACE_NODE_PREFIX: &str = "node";
 
 /// Name of the network interface used by the ABD writer node.
-pub const ABD_WRITER_IFACE_NAME: &str = "writer";
+pub const ABD_IFACE_WRITER: &str = "writer";
 
-/// Identifier for the ABD writer node.
-pub const ABD_WRITER_ID: u32 = 0;
+/// Magic number used to identify valid ABD messages.
+pub const ABD_MAGIC: u32 = 0xdead_beef;
 
-/// UDP port used for ABD protocol communication between nodes.
-pub const ABD_UDP_PORT: u16 = 4242;
+/// Maximum number of nodes supported in the ABD protocol.
+pub const ABD_MAX_NODES: u32 = 16;
 
 /// UDP port used by the ABD server for communication.
 pub const ABD_SERVER_UDP_PORT: u16 = 4243;
 
-/// Magic number used to identify valid ABD messages.
-pub const ABD_MAGIC: u32 = 0xdead_beef;
+/// UDP port used for ABD protocol communication between nodes.
+pub const ABD_UDP_PORT: u16 = 4242;
+
+/// Identifier for the ABD writer node.
+pub const ABD_WRITER_ID: u32 = 0;
 
 /// Enum representing the type of ABD protocol message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -161,9 +161,6 @@ pub struct NodeInfo {
     /// MAC address of the node.
     pub mac: [u8; 6],
 }
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for NodeInfo {}
-
 impl NodeInfo {
     /// Constructs a new `NodeInfo` with the given parameters.
     ///
@@ -178,6 +175,12 @@ impl NodeInfo {
         Self { ifindex, ipv4, mac }
     }
 }
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "unsafe because of Pod trait"
+)]
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for NodeInfo {}
 
 /// Information about a client in the ABD protocol.
 ///

@@ -1,19 +1,15 @@
-use std::env;
-
-use abd::helpers::map_utils::populate_nodes_map;
-use anyhow::Context;
+use abd::populate_nodes_map;
 use aya::{
-    programs::{Xdp, XdpFlags},
+    programs::{tc, SchedClassifier, TcAttachType},
     EbpfLoader,
 };
 use clap::Parser;
-use log::{debug, info, warn};
+use log::{debug, info, logger, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
-/// An XDP program which implements an ABD server
+/// Load and attach the ABD reader (TC egress) to the server NIC.
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
 struct Args {
     /// Network interface to attach to
     #[arg(long, default_value = "eth0")]
@@ -34,8 +30,8 @@ async fn main() -> anyhow::Result<()> {
 
     let Args {
         iface,
-        node_id,
         num_nodes,
+        node_id,
     } = Args::parse();
 
     // Check that the node_id is valid
@@ -65,16 +61,19 @@ async fn main() -> anyhow::Result<()> {
         .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/server"
+            "/reader"
         )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf, logger()) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {e}");
     }
-    let program: &mut Xdp = ebpf.program_mut("server").unwrap().try_into()?;
+
+    // error adding clsact to the interface if it is already added is harmless
+    // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
+    let _ = tc::qdisc_add_clsact(&iface);
+    let program: &mut SchedClassifier = ebpf.program_mut("reader").unwrap().try_into()?;
     program.load()?;
-    program.attach(&iface, XdpFlags::default())
-        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
+    program.attach(&iface, TcAttachType::Ingress)?;
 
     // Populate the info maps
     let network_interfaces = NetworkInterface::show().unwrap();

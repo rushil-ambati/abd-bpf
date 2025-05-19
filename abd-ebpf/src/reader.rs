@@ -1,20 +1,16 @@
 #![no_std]
 #![no_main]
 
-use core::net::Ipv4Addr;
-
-use abd_common::{
-    AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_NODE_MAX, ABD_SERVER_UDP_PORT,
-    ABD_UDP_PORT,
-};
+use abd_common::{AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT};
 use abd_ebpf::helpers::{
-    offsets::{ETH_DST_OFF, ETH_SRC_OFF},
-    tc::{set_ipv4_dst_addr, set_ipv4_src_addr, set_udp_dst_port, set_udp_src_port, store},
-    utils::{calculate_udp_csum_update, parse_abd_packet, AbdPacket, BpfResult},
+    common::{
+        map_get_or_default, map_increment, map_insert, parse_abd_packet, read_global,
+        update_abd_msg_field, AbdPacket, BpfResult,
+    },
+    tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
 use aya_ebpf::{
-    bindings::{TC_ACT_REDIRECT, TC_ACT_SHOT, TC_ACT_STOLEN},
-    helpers::r#gen::bpf_redirect,
+    bindings::{TC_ACT_SHOT, TC_ACT_STOLEN},
     macros::{classifier, map},
     maps::{Array, HashMap},
     programs::TcContext,
@@ -32,7 +28,7 @@ static NODE_ID: u32 = 0;
 
 /// Node information - populated from userspace
 #[map]
-static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_NODE_MAX, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Info about the client we're currently servicing
 #[map]
@@ -66,12 +62,12 @@ pub fn reader(ctx: TcContext) -> i32 {
 }
 
 fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
-    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
+    let num_nodes = unsafe { read_global(&NUM_NODES) };
     if num_nodes == 0 {
         error!(ctx, "Number of nodes is not set");
         return Err(TC_ACT_SHOT.into());
     }
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
+    let my_id = unsafe { read_global(&NODE_ID) };
     if my_id == 0 {
         error!(ctx, "Node ID is not set");
         return Err(TC_ACT_SHOT.into());
@@ -79,14 +75,10 @@ fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
 
     let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
 
+    let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
     let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
-        error!(
-            ctx,
-            "Invalid message type {} from {}",
-            msg_type,
-            pkt.msg.sender.to_native()
-        );
+        error!(ctx, "Invalid message type {} from {}", msg_type, sender);
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
@@ -99,7 +91,7 @@ fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
                 "@{}: Received unexpected message type {} from @{}, dropping...",
                 my_id,
                 msg_type,
-                pkt.msg.sender.to_native()
+                sender
             );
             Ok(TC_ACT_SHOT)
         }
@@ -110,68 +102,44 @@ fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
 fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     info!(ctx, "READ from client");
 
-    if is_not_status(0) {
+    // busy?
+    if map_get_or_default(&STATUS, &0) != 0 {
         return Ok(TC_ACT_SHOT);
     }
 
-    STATUS.insert(&0, &1, 0).map_err(|_| {
-        error!(ctx, "Failed to set status to Phase-1");
-        TC_ACT_SHOT
-    })?;
-    MAX_TAG.insert(&0, &0, 0).map_err(|_| {
-        error!(ctx, "Failed to reset max tag");
-        TC_ACT_SHOT
-    })?;
-    MAX_VALUE.insert(&0, &0, 0).map_err(|_| {
-        error!(ctx, "Failed to reset max value");
-        TC_ACT_SHOT
-    })?;
-    ACK_COUNT.insert(&0, &0, 0).map_err(|_| {
-        error!(ctx, "Failed to reset ack count");
-        TC_ACT_SHOT
-    })?;
+    // initialise Phase-1 state
+    map_insert(ctx, &STATUS, &0, &1)?;
+    map_insert(ctx, &MAX_TAG, &0, &0)?;
+    map_insert(ctx, &MAX_VALUE, &0, &0)?;
+    map_insert(ctx, &ACK_COUNT, &0, &0)?;
 
     // remember client
-    let client = ClientInfo::new(
-        (unsafe { *ctx.skb.skb }).ingress_ifindex,
-        Ipv4Addr::from(u32::from_be(pkt.iph.src_addr)),
-        pkt.eth.src_addr,
-        u16::from_be(pkt.udph.source),
-    );
-    CLIENT_INFO.insert(&0, &client, 0).map_err(|_| {
-        error!(ctx, "Failed to store client info");
-        TC_ACT_SHOT
-    })?;
+    store_client_info(ctx, &CLIENT_INFO, &pkt)
+        .inspect_err(|_| error!(ctx, "Failed to store client info"))?;
 
     // increment read counter
-    let new_rc = unsafe { READ_COUNTER.get(&0) }
-        .unwrap_or(&0)
-        .wrapping_add(1);
-    READ_COUNTER.insert(&0, &new_rc, 0).ok();
+    let new_rc = map_increment(ctx, &READ_COUNTER, &0)?;
 
     // set ABD message values in-place
-    munge!(let ArchivedAbdMsg { mut sender, mut counter, .. } = pkt.msg);
+    munge!(let ArchivedAbdMsg { mut counter, mut sender, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
-
-    calculate_udp_csum_update(ctx, &counter, new_rc.into(), &mut udp_csum)?;
-    *counter = new_rc.into();
-
+    let my_id = unsafe { read_global(&NODE_ID) };
+    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut counter, new_rc.into(), &mut udp_csum)?;
     pkt.udph.check = udp_csum;
 
-    broadcast_to_nodes(ctx)
+    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    broadcast_to_nodes(ctx, my_id, &NODES, num_nodes)
         .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
 }
 
 /// Handle a R-ACK from a replica (Phase-1)
 fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, mut counter, .. } = pkt.msg);
+    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, mut type_, mut value, .. } = pkt.msg);
 
-    if is_not_status(1) {
+    if map_get_or_default(&STATUS, &0) != 1 {
         debug!(
             ctx,
             "Dropping R-ACK from @{} (tag={} value={}) - not in Phase-1",
@@ -183,7 +151,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     }
 
     // ensure the ACK is for the current operation
-    let rc = *unsafe { READ_COUNTER.get(&0) }.unwrap_or(&0);
+    let rc = map_get_or_default(&READ_COUNTER, &0);
     if counter.to_native() != rc {
         warn!(
             ctx,
@@ -203,19 +171,18 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     // bump ack counter
-    let acks = incr_acks(ctx)?;
+    let acks = map_increment(ctx, &ACK_COUNT, &0)?;
 
     // update max tag & value
-    let max_tag = *unsafe { MAX_TAG.get(&0) }.unwrap_or(&0);
+    let max_tag = map_get_or_default(&MAX_TAG, &0);
     if tag.to_native() > max_tag {
-        MAX_TAG.insert(&0, &tag.to_native(), 0).ok();
-        let val = value.to_native();
-        MAX_VALUE.insert(&0, &val, 0).ok();
+        map_insert(ctx, &MAX_TAG, &0, &tag.to_native())?;
+        map_insert(ctx, &MAX_VALUE, &0, &value.to_native())?;
     }
 
     // check if we have enough ACKs
-    let majority = (unsafe { core::ptr::read_volatile(&raw const NUM_NODES) } >> 1) + 1;
-    if acks < u64::from(majority) {
+    let majority = u64::from(((unsafe { read_global(&NUM_NODES) }) >> 1) + 1);
+    if acks < majority {
         info!(
             ctx,
             "Phase-1: got {} R-ACK(s), waiting for majority ({})...", acks, majority
@@ -226,41 +193,23 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     info!(ctx, "Phase-1 complete, majority ({}) reached", majority);
 
     // proceed to Phase-2
-    STATUS.insert(&0, &2, 0).map_err(|_| {
-        error!(ctx, "Failed to set status to Phase-2");
-        TC_ACT_SHOT
-    })?;
-    let rc_incr = rc + 1;
-    READ_COUNTER.insert(&0, &rc_incr, 0).map_err(|_| {
-        error!(ctx, "Failed to increment read counter");
-        TC_ACT_SHOT
-    })?;
-    ACK_COUNT.insert(&0, &0, 0).map_err(|_| {
-        error!(ctx, "Failed to reset ack count");
-        TC_ACT_SHOT
-    })?;
+    map_insert(ctx, &STATUS, &0, &2)?;
+    let new_rc = rc + 1;
+    map_insert(ctx, &READ_COUNTER, &0, &new_rc)?;
+    map_insert(ctx, &ACK_COUNT, &0, &0)?;
 
     // craft the WRITE message
-    let max_tag = *unsafe { MAX_TAG.get(&0) }.unwrap_or(&0);
-    let max_value = *unsafe { MAX_VALUE.get(&0) }.unwrap_or(&0);
+    let max_tag = map_get_or_default(&MAX_TAG, &0);
+    let max_value = map_get_or_default(&MAX_VALUE, &0);
 
     let mut csum = pkt.udph.check;
 
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut csum)?;
-    *sender = my_id.into();
-
-    calculate_udp_csum_update(ctx, &type_, AbdMsgType::Write.into(), &mut csum)?;
-    *type_ = AbdMsgType::Write.into();
-
-    calculate_udp_csum_update(ctx, &tag, max_tag.into(), &mut csum)?;
-    *tag = max_tag.into();
-
-    calculate_udp_csum_update(ctx, &value, max_value.into(), &mut csum)?;
-    *value = max_value.into();
-
-    calculate_udp_csum_update(ctx, &counter, rc_incr.into(), &mut csum)?;
-    *counter = rc_incr.into();
+    let my_id = unsafe { read_global(&NODE_ID) };
+    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut csum)?;
+    update_abd_msg_field(ctx, &mut type_, AbdMsgType::Write.into(), &mut csum)?;
+    update_abd_msg_field(ctx, &mut tag, max_tag.into(), &mut csum)?;
+    update_abd_msg_field(ctx, &mut value, max_value.into(), &mut csum)?;
+    update_abd_msg_field(ctx, &mut counter, new_rc.into(), &mut csum)?;
 
     pkt.udph.check = csum;
 
@@ -269,24 +218,29 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         "Phase-2: propagate tag={} value={}", max_tag, max_value
     );
 
-    broadcast_to_nodes(ctx)
+    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    broadcast_to_nodes(ctx, my_id, &NODES, num_nodes)
         .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
 }
 
 /// Handle a W-ACK from a replica (Phase-2)
 fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    if is_not_status(2) {
+    if map_get_or_default(&STATUS, &0) != 2 {
+        debug!(
+            ctx,
+            "Dropping W-ACK from @{} - not in Phase-2",
+            pkt.msg.sender.to_native()
+        );
         return Ok(TC_ACT_SHOT);
     }
 
-    let rc = *unsafe { READ_COUNTER.get(&0) }.unwrap_or(&0);
-    if pkt.msg.counter.to_native() != rc {
+    let counter = pkt.msg.counter.to_native();
+    let rc = map_get_or_default(&READ_COUNTER, &0);
+    if counter != rc {
         warn!(
             ctx,
-            "Phase-2: W-ACK counter mismatch: expected {} but got {}",
-            rc,
-            pkt.msg.counter.to_native()
+            "Phase-2: W-ACK counter mismatch: expected {} but got {}", rc, counter
         );
         return Ok(TC_ACT_SHOT);
     }
@@ -297,8 +251,8 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         pkt.msg.sender.to_native(),
     );
 
-    let acks = incr_acks(ctx)?;
-    let majority = (unsafe { core::ptr::read_volatile(&raw const NUM_NODES) } >> 1) + 1;
+    let acks = map_increment(ctx, &ACK_COUNT, &0)?;
+    let majority = (unsafe { read_global(&NUM_NODES) } >> 1) + 1;
     if acks < u64::from(majority) {
         info!(
             ctx,
@@ -313,155 +267,40 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     // clean up
-    STATUS.remove(&0).map_err(|_| {
-        error!(ctx, "Failed to clear status");
-        TC_ACT_SHOT
-    })?;
-    ACK_COUNT.remove(&0).map_err(|_| {
-        error!(ctx, "Failed to clear ack count");
-        TC_ACT_SHOT
-    })?;
+    map_insert(ctx, &STATUS, &0, &0)?;
+    map_insert(ctx, &ACK_COUNT, &0, &0)?;
 
     send_read_ack_to_client(ctx, pkt).inspect_err(|_| error!(ctx, "Failed to send R-ACK to client"))
 }
 
-/// Broadcast the current packet to every replica
-#[allow(clippy::inline_always)]
-#[inline(always)]
-fn broadcast_to_nodes(ctx: &TcContext) -> BpfResult<()> {
-    // servers must reply on our UDP port
-    set_udp_src_port(ctx, ABD_UDP_PORT).map_err(|e| {
-        error!(ctx, "Failed to update source UDP port: {}", e);
-        TC_ACT_SHOT
-    })?;
-
-    // send on server port
-    set_udp_dst_port(ctx, ABD_SERVER_UDP_PORT).map_err(|e| {
-        error!(ctx, "Failed to update destination UDP port: {}", e);
-        TC_ACT_SHOT
-    })?;
-
-    // set L3/L2 source addresses as our own
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    let me = NODES.get(my_id).ok_or_else(|| {
-        error!(ctx, "Failed to get info for self (@{})", my_id);
-        TC_ACT_SHOT
-    })?;
-    set_ipv4_src_addr(ctx, me.ipv4)
-        .inspect_err(|e| error!(ctx, "Failed to update source IP address: {}", *e))?;
-    store(ctx, ETH_SRC_OFF, &me.mac, 0)
-        .inspect_err(|e| error!(ctx, "Failed to update source MAC address: {}", *e))?;
-
-    let num_nodes = unsafe { core::ptr::read_volatile(&raw const NUM_NODES) };
-    for i in 1..=num_nodes {
-        let peer = NODES.get(i).ok_or_else(|| {
-            error!(ctx, "Failed to get info for @{}", i);
-            TC_ACT_SHOT
-        })?;
-
-        // set L3/L2 destination addresses to the peer
-        set_ipv4_dst_addr(ctx, peer.ipv4).map_err(|e| {
-            error!(ctx, "Failed to update destination IP address: {}", e);
-            TC_ACT_SHOT
-        })?;
-        store(ctx, ETH_DST_OFF, &peer.mac, 0).map_err(|e| {
-            error!(ctx, "Failed to update destination MAC address: {}", e);
-            TC_ACT_SHOT
-        })?;
-
-        ctx.clone_redirect(peer.ifindex, 0)
-            .inspect_err(|e| error!(ctx, "Failed to clone and redirect to @{}: {}", i, *e))?;
-        debug!(
-            ctx,
-            "clone_redirect -> @{} ({}@if{})", i, peer.ipv4, peer.ifindex
-        );
-    }
-    Ok(())
-}
-
 /// After propagation (Phase-2), send a R-ACK to original client
 fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut type_, mut tag, mut value, mut counter, .. } = pkt.msg);
+    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, mut type_, mut value, .. } = pkt.msg);
 
-    let max_tag = *unsafe { MAX_TAG.get(&0) }.unwrap_or(&0);
-    let max_value = *unsafe { MAX_VALUE.get(&0) }.unwrap_or(&0);
+    let max_tag = map_get_or_default(&MAX_TAG, &0);
+    let max_value = map_get_or_default(&MAX_VALUE, &0);
 
     // set ABD message values in-place
     let mut udp_csum = pkt.udph.check;
-
-    let my_id = unsafe { core::ptr::read_volatile(&raw const NODE_ID) };
-    calculate_udp_csum_update(ctx, &sender, my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
-
-    calculate_udp_csum_update(ctx, &type_, AbdMsgType::ReadAck.into(), &mut udp_csum)?;
-    *type_ = AbdMsgType::ReadAck.into();
-
-    calculate_udp_csum_update(ctx, &tag, max_tag.into(), &mut udp_csum)?;
-    *tag = max_tag.into();
-
-    calculate_udp_csum_update(ctx, &value, max_value.into(), &mut udp_csum)?;
-    *value = max_value.into();
-
-    calculate_udp_csum_update(ctx, &counter, 0u64.into(), &mut udp_csum)?;
-    *counter = 0.into();
-
+    let my_id = unsafe { read_global(&NODE_ID) };
+    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut type_, AbdMsgType::ReadAck.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut tag, max_tag.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut value, max_value.into(), &mut udp_csum)?;
+    update_abd_msg_field(ctx, &mut counter, 0u64.into(), &mut udp_csum)?;
     pkt.udph.check = udp_csum;
 
-    let me =
-        unsafe { NODES.get(core::ptr::read_volatile(&raw const NODE_ID)) }.ok_or_else(|| {
-            error!(ctx, "Failed to get info for self (@{})", my_id);
-            TC_ACT_SHOT
-        })?;
     let client = unsafe { CLIENT_INFO.get(&0) }.ok_or_else(|| {
         error!(ctx, "Failed to get client info");
         TC_ACT_SHOT
     })?;
-
-    // L2/L3/L4 back to client
-    set_udp_dst_port(ctx, ABD_UDP_PORT)
-        .inspect_err(|e| error!(ctx, "Failed to update the source UDP port: {}", *e))?;
-    set_udp_dst_port(ctx, client.port)
-        .inspect_err(|e| error!(ctx, "Failed to update the destination UDP port: {}", *e))?;
-
-    set_ipv4_src_addr(ctx, me.ipv4)
-        .inspect_err(|e| error!(ctx, "Failed to update the source IP address: {}", *e))?;
-    set_ipv4_dst_addr(ctx, client.ipv4)
-        .inspect_err(|e| error!(ctx, "Failed to update the destination IP address: {}", *e))?;
-
-    store(ctx, ETH_SRC_OFF, &me.mac, 0)
-        .inspect_err(|e| error!(ctx, "Failed to update the source MAC address: {}", *e))?;
-    store(ctx, ETH_DST_OFF, &client.mac, 0)
-        .inspect_err(|e| error!(ctx, "Failed to update the destination MAC address: {}", *e))?;
-
-    let ret = i32::try_from(unsafe { bpf_redirect(client.ifindex, 0) }).map_err(|_| {
-        error!(ctx, "bpf_redirect failed");
+    let me = NODES.get(my_id).ok_or_else(|| {
+        error!(ctx, "Failed to get info for self (@{})", my_id);
         TC_ACT_SHOT
     })?;
-    if ret == TC_ACT_REDIRECT {
-        info!(ctx, "Sent R-ACK to client ({})", client.ipv4);
-        Ok(ret)
-    } else {
-        error!(ctx, "bpf_redirect failed");
-        Err(ret.into())
-    }
-}
-
-/// Returns true if the current status is not `want`.
-#[inline]
-fn is_not_status(want: u8) -> bool {
-    let status = unsafe { STATUS.get(&0) }.map_or(0, |v| *v);
-    status != want
-}
-
-/// Increment the acknowledgment count, returning the new value.
-#[inline]
-fn incr_acks(ctx: &TcContext) -> BpfResult<u64> {
-    let new = unsafe { ACK_COUNT.get(&0) }.unwrap_or(&0).wrapping_add(1);
-    ACK_COUNT.insert(&0, &new, 0).map_err(|_| {
-        error!(ctx, "Failed to increment ack count");
-        TC_ACT_SHOT
-    })?;
-    Ok(new)
+    redirect_to_client(ctx, client, me).inspect(|_| {
+        info!(ctx, "R-ACK -> {}", client.ipv4);
+    })
 }
 
 #[cfg(not(test))]

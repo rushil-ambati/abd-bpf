@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use abd_ebpf::helpers::utils::{ptr_at, BpfResult};
+use abd_ebpf::helpers::common::{ptr_at, BpfResult};
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_PASS},
     macros::xdp,
@@ -10,7 +10,7 @@ use aya_ebpf::{
 use aya_log_ebpf::info;
 use network_types::eth::EthHdr;
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(clippy::needless_pass_by_value)]
 #[xdp]
 pub fn xdp_pass(ctx: XdpContext) -> u32 {
     match unsafe { try_xdp_pass(&ctx) } {

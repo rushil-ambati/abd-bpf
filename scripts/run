@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 NUM_NODES=3
 DEBUG=0
 WAIT_FOR_SERVICES=0
-TESTENV=(sudo -n tools/testenv/testenv.sh)
+TESTENV=(sudo -n scripts/testenv/testenv.sh)
 
 sudo -v || {
   echo "need sudo"

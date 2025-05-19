@@ -130,7 +130,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("🚀  {label} → {}", server_addr.ip());
+    info!("🚀 {label} -> {}", server_addr.ip());
 
     let start = Instant::now();
     sock.send_to(&payload, server_addr)?;
@@ -154,7 +154,18 @@ fn main() -> anyhow::Result<()> {
 fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
     match AbdMsgType::try_from(resp.type_) {
         Ok(received) if received == expected => {
-            info!("✅  {received:?}, took {elapsed:?}");
+            match received {
+                AbdMsgType::ReadAck => {
+                    info!(
+                        "✅ R-ACK({}) from @{}, took={elapsed:?}",
+                        resp.value, resp.sender
+                    );
+                }
+                AbdMsgType::WriteAck => {
+                    info!("✅ W-ACK from @{}, took={elapsed:?}", resp.sender);
+                }
+                _ => {}
+            }
             debug!(
                 "sender={} tag={} value={} counter={}",
                 resp.sender, resp.tag, resp.value, resp.counter
@@ -162,13 +173,13 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
         }
         Ok(unexpected) => {
             warn!(
-                "❌  Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
+                "❌ Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
                 resp.sender
             );
         }
         Err(()) => {
             warn!(
-                "❌  Unknown message type: {} from @{}",
+                "❌ Unknown message type: {} from @{}",
                 resp.type_, resp.sender
             );
         }

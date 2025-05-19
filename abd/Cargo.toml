@@ -31,16 +31,16 @@ abd-ebpf = { path = "../abd-ebpf" }
 
 [[bin]]
 name = "reader"
-path = "src/reader.rs"
+path = "src/bin/reader.rs"
 
 [[bin]]
 name = "server"
-path = "src/server.rs"
+path = "src/bin/server.rs"
 
 [[bin]]
 name = "writer"
-path = "src/writer.rs"
+path = "src/bin/writer.rs"
 
 [[bin]]
 name = "xdp-pass"
-path = "src/xdp_pass.rs"
+path = "src/bin/xdp_pass.rs"

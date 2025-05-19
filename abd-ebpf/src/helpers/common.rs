@@ -1,4 +1,4 @@
-use core::mem::size_of;
+use core::mem::{offset_of, size_of};
 
 use abd_common::{ArchivedAbdMsg, ABD_MAGIC};
 use aya_ebpf::{
@@ -7,6 +7,7 @@ use aya_ebpf::{
         TC_ACT_PIPE, TC_ACT_SHOT,
     },
     helpers::r#gen::bpf_csum_diff,
+    maps::HashMap,
     programs::{TcContext, XdpContext},
     EbpfContext,
 };
@@ -16,9 +17,21 @@ use network_types::{
     ip::{IpProto, Ipv4Hdr},
     udp::UdpHdr,
 };
-use rkyv::{access_unchecked_mut, seal::Seal};
+use rkyv::{access_unchecked_mut, seal::Seal, traits::NoUndef};
 
-use super::offsets::{UDPH_OFF, UDP_PAYLOAD_OFF};
+pub const ETH_SRC_OFF: usize = offset_of!(EthHdr, src_addr);
+pub const ETH_DST_OFF: usize = offset_of!(EthHdr, dst_addr);
+
+pub const IPH_OFF: usize = EthHdr::LEN;
+pub const IPH_SRC_OFF: usize = IPH_OFF + offset_of!(Ipv4Hdr, src_addr);
+pub const IPH_DST_OFF: usize = IPH_OFF + offset_of!(Ipv4Hdr, dst_addr);
+pub const IPH_CSUM_OFF: usize = IPH_OFF + offset_of!(Ipv4Hdr, check);
+
+pub const UDPH_OFF: usize = IPH_OFF + Ipv4Hdr::LEN;
+pub const UDPH_SRC_OFF: usize = UDPH_OFF + offset_of!(UdpHdr, source);
+pub const UDPH_DST_OFF: usize = UDPH_OFF + offset_of!(UdpHdr, dest);
+pub const UDPH_CSUM_OFF: usize = UDPH_OFF + offset_of!(UdpHdr, check);
+pub const UDP_PAYLOAD_OFF: usize = UDPH_OFF + UdpHdr::LEN;
 
 // Alias for results from BPF functions
 pub type BpfResult<T> = Result<T, i64>;
@@ -89,8 +102,8 @@ pub struct AbdPacket<'a> {
 ///
 /// # Errors
 ///
-/// If the packet is not an ABD packet, returns `C::IGNORE` (`XDP_PASS` or `TC_ACT_PIPE`).
-/// If any other error occurs during packet parsing, returns `C::ABORT` (`XDP_ABORTED` or `TC_ACT_SHOT`).
+/// If the packet is not an ABD packet, returns `XDP_PASS` or `TC_ACT_PIPE` depending on the context.
+/// If any other error occurs during packet parsing, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
 pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> BpfResult<AbdPacket> {
     // Ethernet → must be IPv4
     let eth_ptr: *mut EthHdr = ptr_at(ctx, 0)?;
@@ -148,18 +161,25 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     })
 }
 
-/// Calculate the new UDP checksum after changing a field in the packet
+/// Updates a field in the ABD message and recomputes the UDP checksum.
+///
+/// The existing checksum should be passed in as `udp_csum` and it will be updated with the new checksum.
+/// After all modifications, the checksum should be written back to the UDP header by the caller.
 ///
 /// # Errors
 ///
 /// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
 #[inline]
-pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
+pub fn update_abd_msg_field<C, T>(
     ctx: &C,
-    field: &Seal<'_, T>,
+    field: &mut Seal<'_, T>,
     new_val: T,
     udp_csum: &mut u16,
-) -> BpfResult<()> {
+) -> BpfResult<()>
+where
+    C: PacketBuf,
+    T: PartialEq + Copy + NoUndef + Unpin,
+{
     if **field == new_val {
         return Ok(()); // no change
     }
@@ -200,13 +220,17 @@ pub fn calculate_udp_csum_update<C: PacketBuf, T: PartialEq + Copy>(
         return Err(C::ABORT);
     }
 
-    #[allow(clippy::cast_sign_loss)]
+    #[expect(clippy::cast_sign_loss)]
     let new_csum = csum_fold_helper(ret as u64);
     *udp_csum = new_csum;
+
+    // Update the field with the new value
+    **field = new_val;
+
     Ok(())
 }
 
-// Converts a checksum into u16
+/// Converts a checksum into u16
 #[inline]
 fn csum_fold_helper(mut csum: u64) -> u16 {
     for _i in 0..4 {
@@ -214,6 +238,81 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
             csum = (csum & 0xffff) + (csum >> 16);
         }
     }
-    #[allow(clippy::cast_possible_truncation)]
-    !(csum as u16)
+    #[expect(clippy::cast_possible_truncation)]
+    return !(csum as u16);
+}
+
+/// Reads a global variable `var` from within a BPF program.
+#[expect(clippy::inline_always, clippy::missing_safety_doc)]
+#[must_use]
+#[inline(always)]
+pub unsafe fn read_global(var: &'static u32) -> u32 {
+    core::ptr::read_volatile(&raw const *var)
+}
+
+/// Reads a value out of a `HashMap` at the given `key`, returning a default value if it is not found.
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub fn map_get_or_default<K, V>(map: &HashMap<K, V>, key: &K) -> V
+where
+    K: Copy,
+    V: Copy + Default,
+{
+    unsafe { map.get(key) }.map_or_else(V::default, |v| *v)
+}
+
+/// Inserts a value into a `HashMap` at the given `key`.
+///
+/// # Errors
+///
+/// If the insertion fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub fn map_insert<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K, val: &V) -> BpfResult<()>
+where
+    C: PacketBuf,
+    K: Copy,
+    V: Copy,
+{
+    map.insert(key, val, 0).map_err(|_| {
+        error!(ctx, "Failed to insert into map");
+        C::ABORT
+    })
+}
+
+/// Increments a value in a `HashMap` at the given `key` by 1, returning the new value.
+///
+/// # Errors
+///
+/// If the increment fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[inline]
+pub fn map_increment<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K) -> BpfResult<V>
+where
+    C: PacketBuf,
+    K: Copy,
+    V: Copy + core::ops::Add<Output = V> + From<u8> + Default,
+{
+    let val = map_get_or_default(map, key) + V::from(1);
+    map.insert(key, &val, 0).map_err(|_| {
+        error!(ctx, "Failed to increment map value");
+        C::ABORT
+    })?;
+    Ok(val)
+}
+
+/// Removes a value from a `HashMap` at the given `key`.
+///
+/// # Errors
+///
+/// If the removal fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[inline]
+pub fn map_remove<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K) -> BpfResult<()>
+where
+    C: PacketBuf,
+    K: Copy,
+{
+    map.remove(key).map_err(|_| {
+        error!(ctx, "Failed to remove from map");
+        C::ABORT
+    })
 }
