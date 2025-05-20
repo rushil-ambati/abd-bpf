@@ -251,7 +251,7 @@ fn set_ipv4_addr(ctx: &TcContext, offset: usize, ip: Ipv4Addr) -> BpfResult<()> 
         IPH_CSUM_OFF,
         u64::from(old_ip),
         u64::from(new_ip),
-        core::mem::size_of_val(&new_ip) as u64,
+        size_of_val(&new_ip) as u64,
     )
     .map_err(|e| {
         error!(ctx, "Failed to update the IP header checksum: {}", e);
@@ -325,7 +325,7 @@ pub fn skb_store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> BpfRes
         error!(ctx, "failed to convert offset to u32");
         TC_ACT_SHOT
     })?;
-    let len: u32 = core::mem::size_of::<T>().try_into().map_err(|_| {
+    let len: u32 = size_of::<T>().try_into().map_err(|_| {
         error!(ctx, "failed to convert size to u32");
         TC_ACT_SHOT
     })?;

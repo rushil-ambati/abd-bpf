@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::ptr::copy_nonoverlapping;
+
 use abd_common::{
     AbdMsgType, ArchivedAbdMsg, ArchivedAbdValue, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT,
 };
@@ -112,7 +114,6 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // initialise Phase-1 state
     map_insert(ctx, &STATUS, &0, &1)?;
     map_insert(ctx, &MAX_TAG, &0, &0)?;
-    map_insert(ctx, &MAX_VALUE, &0, &ArchivedAbdValue::default())?;
     map_insert(ctx, &ACK_COUNT, &0, &0)?;
 
     // remember client
@@ -222,11 +223,11 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     recompute_udp_csum_for_abd(ctx, &value, max_value, &mut csum)?;
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            max_value as *const _ as *const u8,
-            value.unseal() as *const _ as *mut u8,
-            core::mem::size_of::<ArchivedAbdValue>(),
-        )
+        copy_nonoverlapping(
+            core::ptr::from_ref(max_value).cast(),
+            core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
+            size_of::<ArchivedAbdValue>(),
+        );
     };
 
     recompute_udp_csum_for_abd(ctx, &counter, &new_rc.into(), &mut csum)?;
@@ -316,11 +317,11 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     recompute_udp_csum_for_abd(ctx, &value, max_value, &mut udp_csum)?;
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            max_value as *const _ as *const u8,
-            value.unseal() as *const _ as *mut u8,
-            core::mem::size_of::<ArchivedAbdValue>(),
-        )
+        copy_nonoverlapping(
+            core::ptr::from_ref(max_value).cast(),
+            core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
+            size_of::<ArchivedAbdValue>(),
+        );
     };
 
     recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;

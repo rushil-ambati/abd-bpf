@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
 
+use core::{mem::swap, ptr::copy_nonoverlapping};
+
 use abd_common::{
     AbdMsgType, ArchivedAbdMsg, ArchivedAbdValue, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT,
 };
@@ -99,38 +101,20 @@ fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     info!(ctx, "READ from @{}", sender);
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    let dest = lookup_dest(ctx, sender)?;
-
-    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
-    let mut udp_csum = pkt.udph.check;
-
-    let my_id = unsafe { read_global(&NODE_ID) };
-    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
-
-    let new_type = AbdMsgType::ReadAck;
-    recompute_udp_csum_for_abd(ctx, &type_, &new_type.into(), &mut udp_csum)?;
-    *type_ = new_type.into();
-
-    let stored_tag = map_get_or_default(&TAG, &0);
-    recompute_udp_csum_for_abd(ctx, &tag, &stored_tag.into(), &mut udp_csum)?;
-    *tag = stored_tag.into();
-
-    let stored_value = unsafe { VALUE.get(&0) }.ok_or_else(|| {
+    let tag = map_get_or_default(&TAG, &0);
+    let value = unsafe { VALUE.get(&0) }.ok_or_else(|| {
         error!(ctx, "Failed to get value");
         XDP_ABORTED
     })?;
-    recompute_udp_csum_for_abd(ctx, &value, &stored_value, &mut udp_csum)?;
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            stored_value as *const _ as *const u8,
-            value.unseal() as *const _ as *mut u8,
-            core::mem::size_of::<ArchivedAbdValue>(),
-        )
-    };
 
-    pkt.udph.check = udp_csum;
-    redirect_to_dest(ctx, pkt.udph, pkt.iph, pkt.eth, dest)
+    construct_and_send_ack(
+        ctx,
+        pkt,
+        AbdMsgType::ReadAck,
+        Some(tag),
+        Some(value),
+        lookup_dest(ctx, sender)?,
+    )
 }
 
 fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
@@ -147,6 +131,7 @@ fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
         ctx,
         pkt,
         AbdMsgType::WriteAck,
+        None,
         None,
         lookup_dest(ctx, sender)?,
     )
@@ -196,9 +181,10 @@ fn construct_and_send_ack(
     pkt: AbdPacket,
     new_type: AbdMsgType,
     new_tag: Option<u64>,
+    new_value: Option<&ArchivedAbdValue>,
     dest: Dest,
 ) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, .. } = pkt.msg);
+    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
@@ -211,6 +197,17 @@ fn construct_and_send_ack(
     if let Some(new_tag) = new_tag {
         recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
         *tag = new_tag.into();
+    }
+
+    if let Some(new_value) = new_value {
+        recompute_udp_csum_for_abd(ctx, &value, new_value, &mut udp_csum)?;
+        unsafe {
+            copy_nonoverlapping(
+                core::ptr::from_ref(new_value).cast(),
+                core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
+                size_of::<ArchivedAbdValue>(),
+            );
+        };
     }
 
     pkt.udph.check = udp_csum;
@@ -241,11 +238,11 @@ fn redirect_to_dest(
     dest: Dest,
 ) -> BpfResult<u32> {
     // swap UDP ports and IPs
-    core::mem::swap(&mut udph.source, &mut udph.dest);
-    core::mem::swap(&mut iph.src_addr, &mut iph.dst_addr);
+    swap(&mut udph.source, &mut udph.dest);
+    swap(&mut iph.src_addr, &mut iph.dst_addr);
 
     // swap MACs and set the destination MAC to the destination node
-    core::mem::swap(&mut eth.src_addr, &mut eth.dst_addr);
+    swap(&mut eth.src_addr, &mut eth.dst_addr);
     eth.dst_addr.copy_from_slice(&dest.mac);
 
     info!(

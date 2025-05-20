@@ -51,15 +51,8 @@ struct WriteOpts {
     common: CommonOpts,
 
     /// Value to write (required positional argument)
-    #[arg(value_parser = parse_abd_value)]
+    #[arg(value_parser = clap::value_parser!(AbdValue))]
     value: AbdValue,
-}
-
-/// Parses a string into an `AbdValue`.
-fn parse_abd_value(s: &str) -> Result<AbdValue, String> {
-    s.parse::<u64>()
-        .map(|value| AbdValue { value })
-        .map_err(|_| format!("Invalid AbdValue: {s}"))
 }
 
 #[derive(Args, Debug)]

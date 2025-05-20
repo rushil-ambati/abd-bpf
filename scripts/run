@@ -148,7 +148,7 @@ writer_ip=$(
     cut -d'/' -f1
 )
 
-declare -a values=(42 99 123)
+declare -a values=("1234,abc,192.168.1.1,7,0.25,1.85,!")
 for val in "${values[@]}"; do
   # Write
   run_bg_and_wait "client" "${TESTENV[@]}" exec -n writer -- bash -c "

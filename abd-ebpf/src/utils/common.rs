@@ -1,4 +1,4 @@
-use core::mem::{offset_of, size_of};
+use core::mem::offset_of;
 
 use abd_common::{ArchivedAbdMsg, ABD_MAGIC};
 use aya_ebpf::{
@@ -17,7 +17,7 @@ use network_types::{
     ip::{IpProto, Ipv4Hdr},
     udp::UdpHdr,
 };
-use rkyv::{access_unchecked_mut, seal::Seal, traits::NoUndef};
+use rkyv::{access_unchecked_mut, seal::Seal};
 
 pub const ETH_SRC_OFF: usize = offset_of!(EthHdr, src_addr);
 pub const ETH_DST_OFF: usize = offset_of!(EthHdr, dst_addr);
@@ -82,7 +82,7 @@ impl PacketBuf for TcContext {
 pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = core::mem::size_of::<T>();
+    let len = size_of::<T>();
 
     if start + offset + len > end {
         return Err(C::ABORT);
@@ -178,7 +178,6 @@ pub fn recompute_udp_csum_for_abd<C, T>(
 ) -> BpfResult<()>
 where
     C: PacketBuf,
-    T: NoUndef + Unpin,
 {
     let from_size = u32::try_from(size_of::<T>()).map_err(|_| {
         error!(
@@ -240,6 +239,7 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
 /// # Safety
 /// The caller must ensure that `var` is a valid pointer to a static variable.
 #[must_use]
+#[expect(clippy::inline_always)]
 #[inline(always)]
 pub unsafe fn read_global<T: Copy>(var: &'static T) -> T {
     core::ptr::read_volatile(&raw const *var)

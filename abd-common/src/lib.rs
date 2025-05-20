@@ -3,11 +3,19 @@
 //! This crate provides shared definitions for both kernel and user-space components,
 //! including message types, serialization, and network node/client information.
 
-#![no_std]
+#![cfg_attr(not(feature = "user"), no_std)]
 
-use core::{net::Ipv4Addr, str::FromStr};
+#[cfg(feature = "user")]
+extern crate std;
 
-use rkyv::{rend::u32_le, traits::NoUndef, Archive, Deserialize, Serialize};
+use core::{
+    cmp::min,
+    net::{IpAddr, Ipv4Addr},
+    str::FromStr,
+    time::Duration,
+};
+
+use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
 
 /// Prefix for network interface names assigned to ABD nodes.
 pub const ABD_IFACE_NODE_PREFIX: &str = "node";
@@ -30,111 +38,6 @@ pub const ABD_UDP_PORT: u16 = 4242;
 /// Identifier for the ABD writer node.
 pub const ABD_WRITER_ID: u32 = 0;
 
-/// Value type stored in the ABD system.
-// pub type AbdValue = u64;
-#[derive(Archive, Copy, Clone, Default, Deserialize, Serialize, Debug)]
-#[rkyv(compare(PartialEq), derive(Debug))]
-pub struct AbdValue {
-    pub value: u64,
-}
-unsafe impl NoUndef for ArchivedAbdValue {}
-impl Default for ArchivedAbdValue {
-    fn default() -> Self {
-        Self { value: 0.into() }
-    }
-}
-impl FromStr for AbdValue {
-    type Err = ();
-
-    /// Parses a string into an `AbdValue`.
-    ///
-    /// # Arguments
-    ///
-    /// * `s` - The string to parse.
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(AbdValue)` if the string is a valid representation of an `AbdValue`.
-    /// * `Err(())` if the string cannot be parsed.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        s.parse::<u64>()
-            .map(|value| AbdValue { value })
-            .map_err(|_| ())
-    }
-}
-
-/// Enum representing the type of ABD protocol message.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum AbdMsgType {
-    /// Read request message.
-    Read = 1,
-    /// Acknowledgement for a read operation.
-    ReadAck = 2,
-    /// Write request message.
-    Write = 3,
-    /// Acknowledgement for a write operation.
-    WriteAck = 4,
-}
-
-impl AbdMsgType {
-    /// Converts a `u32` value to an `AbdMsgType` if possible.
-    ///
-    /// Returns `Some(AbdMsgType)` if the value matches a known message type,
-    /// or `None` otherwise.
-    const fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            _ if value == Self::Read as u32 => Some(Self::Read),
-            _ if value == Self::Write as u32 => Some(Self::Write),
-            _ if value == Self::ReadAck as u32 => Some(Self::ReadAck),
-            _ if value == Self::WriteAck as u32 => Some(Self::WriteAck),
-            _ => None,
-        }
-    }
-}
-
-impl From<AbdMsgType> for u32 {
-    /// Converts an `AbdMsgType` to its corresponding `u32` representation.
-    #[inline]
-    fn from(val: AbdMsgType) -> Self {
-        val as Self
-    }
-}
-
-impl From<AbdMsgType> for u32_le {
-    /// Converts an `AbdMsgType` to its little-endian `u32_le` representation.
-    #[inline]
-    fn from(val: AbdMsgType) -> Self {
-        (val as u32).into()
-    }
-}
-
-impl TryFrom<u32> for AbdMsgType {
-    type Error = ();
-
-    /// Attempts to convert a `u32` to an `AbdMsgType`.
-    ///
-    /// Returns `Ok(AbdMsgType)` if the value matches a known message type,
-    /// or `Err(())` otherwise.
-    #[inline]
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        Self::from_u32(value).ok_or(())
-    }
-}
-
-impl TryFrom<u32_le> for AbdMsgType {
-    type Error = ();
-
-    /// Attempts to convert a `u32_le` to an `AbdMsgType`.
-    ///
-    /// Returns `Ok(AbdMsgType)` if the value matches a known message type,
-    /// or `Err(())` otherwise.
-    #[inline]
-    fn try_from(value: u32_le) -> Result<Self, Self::Error> {
-        Self::from_u32(value.into()).ok_or(())
-    }
-}
-
 /// Structure representing an ABD protocol message.
 ///
 /// This struct is serializable with `rkyv` for zero-copy deserialization.
@@ -155,7 +58,6 @@ pub struct AbdMsg {
     /// Value associated with the operation.
     pub value: AbdValue,
 }
-
 impl AbdMsg {
     /// Constructs a new `AbdMsg` with the given parameters.
     ///
@@ -176,6 +78,170 @@ impl AbdMsg {
             tag,
             value,
             counter,
+        }
+    }
+}
+
+impl AbdMsgType {
+    /// Converts a `u32` value to an `AbdMsgType` if possible.
+    ///
+    /// Returns `Some(AbdMsgType)` if the value matches a known message type,
+    /// or `None` otherwise.
+    const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            _ if value == Self::Read as u32 => Some(Self::Read),
+            _ if value == Self::Write as u32 => Some(Self::Write),
+            _ if value == Self::ReadAck as u32 => Some(Self::ReadAck),
+            _ if value == Self::WriteAck as u32 => Some(Self::WriteAck),
+            _ => None,
+        }
+    }
+}
+impl From<AbdMsgType> for u32 {
+    /// Converts an `AbdMsgType` to its corresponding `u32` representation.
+    #[inline]
+    fn from(val: AbdMsgType) -> Self {
+        val as Self
+    }
+}
+impl From<AbdMsgType> for u32_le {
+    /// Converts an `AbdMsgType` to its little-endian `u32_le` representation.
+    #[inline]
+    fn from(val: AbdMsgType) -> Self {
+        (val as u32).into()
+    }
+}
+impl TryFrom<u32> for AbdMsgType {
+    type Error = ();
+
+    /// Attempts to convert a `u32` to an `AbdMsgType`.
+    ///
+    /// Returns `Ok(AbdMsgType)` if the value matches a known message type,
+    /// or `Err(())` otherwise.
+    #[inline]
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or(())
+    }
+}
+
+/// Enum representing the type of ABD protocol message.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum AbdMsgType {
+    /// Read request message.
+    Read = 1,
+    /// Acknowledgement for a read operation.
+    ReadAck = 2,
+    /// Write request message.
+    Write = 3,
+    /// Acknowledgement for a write operation.
+    WriteAck = 4,
+}
+
+/// Value type stored in the ABD system.
+#[derive(Archive, Copy, Clone, Deserialize, Serialize, Debug)]
+#[rkyv(compare(PartialEq), derive(Debug))]
+pub struct AbdValue {
+    primitive: i64,
+    byte_array: [u8; 8],
+    ip_address: IpAddr,
+    duration: Duration,
+    tuple: (f32, f32),
+    optional: Option<char>,
+}
+impl Default for AbdValue {
+    /// Constructs a default `AbdValue` with all fields set to zero or empty.
+    #[inline]
+    fn default() -> Self {
+        Self {
+            primitive: 0,
+            byte_array: [0; 8],
+            ip_address: Ipv4Addr::UNSPECIFIED.into(),
+            duration: Duration::ZERO,
+            tuple: (0., 0.),
+            optional: None,
+        }
+    }
+}
+impl From<&str> for AbdValue {
+    /// Converts a string like `"1234,abc,192.168.1.1,7,0.25,1.85,!"` to an `AbdValue`.
+    /// Expects a comma-separated string containing values in the following order:
+    /// - u64 primitive
+    /// - up to 8-byte string into byte_array
+    /// - an IP address (v4 or v6)
+    /// - a whole number for duration in seconds
+    /// - an f32 value which wil be the first element of the tuple
+    /// - an f32 value which wil be the second element of the tuple
+    /// - an optional character
+    fn from(s: &str) -> Self {
+        let mut parts = s.split(',');
+
+        let primitive = if let Some(part) = parts.next() {
+            i64::from_str(part.trim()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let mut byte_array = [0u8; 8];
+        if let Some(part) = parts.next() {
+            let bytes = part.trim().as_bytes();
+            let len = min(bytes.len(), 8);
+            byte_array[..len].copy_from_slice(&bytes[..len]);
+        }
+
+        let ip_address: IpAddr = if let Some(part) = parts.next() {
+            IpAddr::from_str(part.trim()).unwrap_or(Ipv4Addr::UNSPECIFIED.into())
+        } else {
+            Ipv4Addr::UNSPECIFIED.into()
+        };
+
+        let duration = if let Some(part) = parts.next() {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(trimmed.parse().unwrap_or(0))
+            }
+        } else {
+            Duration::ZERO
+        };
+
+        let mut tuple = (0., 0.);
+        if let Some(part) = parts.next() {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                tuple.0 = 0.;
+            } else {
+                tuple.0 = trimmed.parse().unwrap_or(0.);
+            }
+        }
+        if let Some(part) = parts.next() {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                tuple.1 = 0.;
+            } else {
+                tuple.1 = trimmed.parse().unwrap_or(0.);
+            }
+        }
+
+        let optional: Option<char> = if let Some(part) = parts.next() {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.chars().next().unwrap())
+            }
+        } else {
+            None
+        };
+
+        Self {
+            primitive,
+            byte_array,
+            ip_address,
+            duration,
+            tuple,
+            optional,
         }
     }
 }
