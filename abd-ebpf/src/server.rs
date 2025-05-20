@@ -1,10 +1,12 @@
 #![no_std]
 #![no_main]
 
-use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT};
+use abd_common::{
+    AbdMsgType, ArchivedAbdMsg, ArchivedAbdValue, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT,
+};
 use abd_ebpf::utils::common::{
-    map_get_or_default, map_insert, parse_abd_packet, read_global, update_abd_msg_field, AbdPacket,
-    BpfResult,
+    map_get_or_default, map_insert, parse_abd_packet, read_global, recompute_udp_csum_for_abd,
+    AbdPacket, BpfResult,
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
@@ -35,11 +37,11 @@ static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
 /// Current stored value
 #[map]
-static VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
+static VALUE: HashMap<u32, ArchivedAbdValue> = HashMap::with_max_entries(1, 0); // key = 0
 
 /// Per-node request counter
 #[map]
-static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(ABD_MAX_NODES, 0);
+static COUNTERS: HashMap<u32, u64> = HashMap::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Small struct for “where to send the reply”
 #[derive(Clone, Copy)]
@@ -97,17 +99,38 @@ fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     info!(ctx, "READ from @{}", sender);
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    let tag = map_get_or_default(&TAG, &0);
-    let value = map_get_or_default(&VALUE, &0);
+    let dest = lookup_dest(ctx, sender)?;
 
-    construct_and_send_ack(
-        ctx,
-        pkt,
-        AbdMsgType::ReadAck,
-        Some(tag),
-        Some(value),
-        lookup_dest(ctx, sender)?,
-    )
+    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    let mut udp_csum = pkt.udph.check;
+
+    let my_id = unsafe { read_global(&NODE_ID) };
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
+
+    let new_type = AbdMsgType::ReadAck;
+    recompute_udp_csum_for_abd(ctx, &type_, &new_type.into(), &mut udp_csum)?;
+    *type_ = new_type.into();
+
+    let stored_tag = map_get_or_default(&TAG, &0);
+    recompute_udp_csum_for_abd(ctx, &tag, &stored_tag.into(), &mut udp_csum)?;
+    *tag = stored_tag.into();
+
+    let stored_value = unsafe { VALUE.get(&0) }.ok_or_else(|| {
+        error!(ctx, "Failed to get value");
+        XDP_ABORTED
+    })?;
+    recompute_udp_csum_for_abd(ctx, &value, &stored_value, &mut udp_csum)?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            stored_value as *const _ as *const u8,
+            value.unseal() as *const _ as *mut u8,
+            core::mem::size_of::<ArchivedAbdValue>(),
+        )
+    };
+
+    pkt.udph.check = udp_csum;
+    redirect_to_dest(ctx, pkt.udph, pkt.iph, pkt.eth, dest)
 }
 
 fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
@@ -118,15 +141,12 @@ fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
     let tag = pkt.msg.tag.to_native();
-    let value = pkt.msg.value.to_native();
-
-    store_tag_and_value_if_newer(ctx, tag, value)?;
+    store_tag_and_value_if_newer(ctx, tag, &pkt.msg.value)?;
 
     construct_and_send_ack(
         ctx,
         pkt,
         AbdMsgType::WriteAck,
-        None,
         None,
         lookup_dest(ctx, sender)?,
     )
@@ -150,11 +170,15 @@ fn update_sender_counter_if_newer(ctx: &XdpContext, sender: u32, counter: u64) -
 /// Stores new tag and value if tag is newer
 #[allow(clippy::inline_always)]
 #[inline(always)]
-fn store_tag_and_value_if_newer(ctx: &XdpContext, tag: u64, value: u64) -> BpfResult<()> {
+fn store_tag_and_value_if_newer(
+    ctx: &XdpContext,
+    tag: u64,
+    value: &ArchivedAbdValue,
+) -> BpfResult<()> {
     let current_tag = map_get_or_default(&TAG, &0);
     if tag > current_tag {
         map_insert(ctx, &TAG, &0, &tag)?;
-        map_insert(ctx, &VALUE, &0, &value)?;
+        map_insert(ctx, &VALUE, &0, value)?;
     } else {
         debug!(
             ctx,
@@ -172,21 +196,21 @@ fn construct_and_send_ack(
     pkt: AbdPacket,
     new_type: AbdMsgType,
     new_tag: Option<u64>,
-    new_value: Option<u64>,
     dest: Dest,
 ) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, mut value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut type_, new_type.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
+
+    recompute_udp_csum_for_abd(ctx, &type_, &new_type.into(), &mut udp_csum)?;
+    *type_ = new_type.into();
 
     if let Some(new_tag) = new_tag {
-        update_abd_msg_field(ctx, &mut tag, new_tag.into(), &mut udp_csum)?;
-    }
-    if let Some(new_value) = new_value {
-        update_abd_msg_field(ctx, &mut value, new_value.into(), &mut udp_csum)?;
+        recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
+        *tag = new_tag.into();
     }
 
     pkt.udph.check = udp_csum;

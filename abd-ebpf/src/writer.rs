@@ -7,7 +7,7 @@ use abd_common::{
 use abd_ebpf::utils::{
     common::{
         map_get_or_default, map_increment, map_insert, parse_abd_packet, read_global,
-        update_abd_msg_field, AbdPacket, BpfResult,
+        recompute_udp_csum_for_abd, AbdPacket, BpfResult,
     },
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
@@ -100,7 +100,7 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         return Ok(TC_ACT_SHOT);
     }
 
-    info!(ctx, "WRITE({}) from client", pkt.msg.value.to_native());
+    info!(ctx, "WRITE from client");
 
     map_insert(ctx, &ACTIVE, &0, &true)?;
     map_insert(ctx, &ACK_COUNT, &0, &0)?;
@@ -115,10 +115,17 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // set ABD message values in-place
     munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
+
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut tag, new_tag.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut counter, new_wc.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
+
+    recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
+    *tag = new_tag.into();
+
+    recompute_udp_csum_for_abd(ctx, &counter, &new_wc.into(), &mut udp_csum)?;
+    *counter = new_wc.into();
+
     pkt.udph.check = udp_csum;
 
     let num_nodes = unsafe { read_global(&NUM_NODES) };
@@ -180,10 +187,14 @@ fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut tag, 0.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut counter, 0.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
 
+    recompute_udp_csum_for_abd(ctx, &tag, &0.into(), &mut udp_csum)?;
+    *tag = 0.into();
+
+    recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;
+    *counter = 0.into();
     pkt.udph.check = udp_csum;
 
     let client = unsafe { CLIENT_INFO.get(&0) }.ok_or_else(|| {

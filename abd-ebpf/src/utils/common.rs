@@ -161,7 +161,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     })
 }
 
-/// Updates a field in the ABD message and recomputes the UDP checksum.
+/// Recomputes the UDP checksum for a modification to the ABD message.
 ///
 /// The existing checksum should be passed in as `udp_csum` and it will be updated with the new checksum.
 /// After all modifications, the checksum should be written back to the UDP header by the caller.
@@ -170,20 +170,16 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
 ///
 /// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
 #[inline]
-pub fn update_abd_msg_field<C, T>(
+pub fn recompute_udp_csum_for_abd<C, T>(
     ctx: &C,
-    field: &mut Seal<'_, T>,
-    new_val: T,
+    field: &Seal<'_, T>,
+    new_val: &T,
     udp_csum: &mut u16,
 ) -> BpfResult<()>
 where
     C: PacketBuf,
-    T: PartialEq + Copy + NoUndef + Unpin,
+    T: NoUndef + Unpin,
 {
-    if **field == new_val {
-        return Ok(()); // no change
-    }
-
     let from_size = u32::try_from(size_of::<T>()).map_err(|_| {
         error!(
             ctx,
@@ -207,7 +203,7 @@ where
         bpf_csum_diff(
             &raw const **field as *mut u32,
             from_size,
-            &raw const new_val as *mut u32,
+            &raw const *new_val as *mut u32,
             to_size,
             !u32::from(*udp_csum),
         )
@@ -224,9 +220,6 @@ where
     let new_csum = csum_fold_helper(ret as u64);
     *udp_csum = new_csum;
 
-    // Update the field with the new value
-    **field = new_val;
-
     Ok(())
 }
 
@@ -242,11 +235,13 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
     return !(csum as u16);
 }
 
-/// Reads a global variable `var` from within a BPF program.
-#[expect(clippy::inline_always, clippy::missing_safety_doc)]
+/// Reads a global variable `var` from within a BPF program using a volatile load.
+///
+/// # Safety
+/// The caller must ensure that `var` is a valid pointer to a static variable.
 #[must_use]
 #[inline(always)]
-pub unsafe fn read_global(var: &'static u32) -> u32 {
+pub unsafe fn read_global<T: Copy>(var: &'static T) -> T {
     core::ptr::read_volatile(&raw const *var)
 }
 
@@ -271,8 +266,6 @@ where
 pub fn map_insert<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K, val: &V) -> BpfResult<()>
 where
     C: PacketBuf,
-    K: Copy,
-    V: Copy,
 {
     map.insert(key, val, 0).map_err(|_| {
         error!(ctx, "Failed to insert into map");

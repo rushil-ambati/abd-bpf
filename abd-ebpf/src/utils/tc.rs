@@ -320,7 +320,7 @@ fn set_eth_addr(ctx: &TcContext, offset: usize, mac: &[u8; 6]) -> BpfResult<()> 
 ///
 /// Will return `TC_ACT_SHOT` if any error occurs.
 #[inline]
-fn skb_store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> BpfResult<()> {
+pub fn skb_store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> BpfResult<()> {
     let offset = u32::try_from(offset).map_err(|_| {
         error!(ctx, "failed to convert offset to u32");
         TC_ACT_SHOT

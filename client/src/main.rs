@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use abd_common::{AbdMsg, AbdMsgType, ArchivedAbdMsg, ABD_UDP_PORT};
+use abd_common::{AbdMsg, AbdMsgType, AbdValue, ArchivedAbdMsg, ABD_UDP_PORT};
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
 use rkyv::{deserialize, rancor::Error as RkyvError};
@@ -51,18 +51,21 @@ struct WriteOpts {
     common: CommonOpts,
 
     /// Value to write (required positional argument)
-    #[arg()]
-    value: u64,
+    #[arg(value_parser = parse_abd_value)]
+    value: AbdValue,
+}
+
+/// Parses a string into an `AbdValue`.
+fn parse_abd_value(s: &str) -> Result<AbdValue, String> {
+    s.parse::<u64>()
+        .map(|value| AbdValue { value })
+        .map_err(|_| format!("Invalid AbdValue: {s}"))
 }
 
 #[derive(Args, Debug)]
 struct ReadOpts {
     #[clap(flatten)]
     common: CommonOpts,
-
-    /// Optional value (visible if explicitly passed)
-    #[arg(short = 'v', long)]
-    value: Option<u64>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -84,7 +87,7 @@ fn main() -> anyhow::Result<()> {
             let tag = opts.common.tag.unwrap_or(0);
 
             let msg = AbdMsg::new(sender_id, AbdMsgType::Write, tag, opts.value, counter);
-            let mut label = format!("WRITE({})", opts.value);
+            let mut label = format!("WRITE({:?})", opts.value);
 
             if opts.common.tag.is_some() {
                 let _ = write!(label, " tag={tag}");
@@ -101,12 +104,17 @@ fn main() -> anyhow::Result<()> {
 
         Command::Read(opts) => {
             let server = opts.common.server;
-            let sender_id = opts.common.sender_id.unwrap_or(0);
-            let counter = opts.common.counter.unwrap_or(0);
-            let tag = opts.common.tag.unwrap_or(0);
-            let value = opts.value.unwrap_or(0); // not required for read, but preserved
+            let sender_id = opts.common.sender_id.unwrap_or_default();
+            let counter = opts.common.counter.unwrap_or_default();
+            let tag = opts.common.tag.unwrap_or_default();
 
-            let msg = AbdMsg::new(sender_id, AbdMsgType::Read, tag, value, counter);
+            let msg = AbdMsg::new(
+                sender_id,
+                AbdMsgType::Read,
+                tag,
+                AbdValue::default(),
+                counter,
+            );
             let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
@@ -117,9 +125,6 @@ fn main() -> anyhow::Result<()> {
             }
             if opts.common.sender_id.is_some() {
                 let _ = write!(label, " sender={sender_id}");
-            }
-            if opts.value.is_some() {
-                let _ = write!(label, " value={value}");
             }
 
             (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
@@ -157,7 +162,7 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
             match received {
                 AbdMsgType::ReadAck => {
                     info!(
-                        "R-ACK({}) from @{}, took={elapsed:?}",
+                        "R-ACK({:?}) from @{}, took={elapsed:?}",
                         resp.value, resp.sender
                     );
                 }
@@ -167,7 +172,7 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
                 _ => {}
             }
             debug!(
-                "sender={} tag={} value={} counter={}",
+                "sender={} tag={} value={:?} counter={}",
                 resp.sender, resp.tag, resp.value, resp.counter
             );
         }

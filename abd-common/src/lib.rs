@@ -5,9 +5,9 @@
 
 #![no_std]
 
-use core::net::Ipv4Addr;
+use core::{net::Ipv4Addr, str::FromStr};
 
-use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
+use rkyv::{rend::u32_le, traits::NoUndef, Archive, Deserialize, Serialize};
 
 /// Prefix for network interface names assigned to ABD nodes.
 pub const ABD_IFACE_NODE_PREFIX: &str = "node";
@@ -29,6 +29,39 @@ pub const ABD_UDP_PORT: u16 = 4242;
 
 /// Identifier for the ABD writer node.
 pub const ABD_WRITER_ID: u32 = 0;
+
+/// Value type stored in the ABD system.
+// pub type AbdValue = u64;
+#[derive(Archive, Copy, Clone, Default, Deserialize, Serialize, Debug)]
+#[rkyv(compare(PartialEq), derive(Debug))]
+pub struct AbdValue {
+    pub value: u64,
+}
+unsafe impl NoUndef for ArchivedAbdValue {}
+impl Default for ArchivedAbdValue {
+    fn default() -> Self {
+        Self { value: 0.into() }
+    }
+}
+impl FromStr for AbdValue {
+    type Err = ();
+
+    /// Parses a string into an `AbdValue`.
+    ///
+    /// # Arguments
+    ///
+    /// * `s` - The string to parse.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(AbdValue)` if the string is a valid representation of an `AbdValue`.
+    /// * `Err(())` if the string cannot be parsed.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        s.parse::<u64>()
+            .map(|value| AbdValue { value })
+            .map_err(|_| ())
+    }
+}
 
 /// Enum representing the type of ABD protocol message.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -120,7 +153,7 @@ pub struct AbdMsg {
     /// Message type as a `u32` (see [`AbdMsgType`]).
     pub type_: u32,
     /// Value associated with the operation.
-    pub value: u64,
+    pub value: AbdValue,
 }
 
 impl AbdMsg {
@@ -135,7 +168,7 @@ impl AbdMsg {
     /// * `counter` - The version or ordering counter.
     #[must_use]
     #[inline]
-    pub fn new(sender: u32, type_: AbdMsgType, tag: u64, value: u64, counter: u64) -> Self {
+    pub fn new(sender: u32, type_: AbdMsgType, tag: u64, value: AbdValue, counter: u64) -> Self {
         Self {
             magic: ABD_MAGIC,
             sender,
