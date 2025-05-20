@@ -1,4 +1,4 @@
-use std::env;
+use std::io::Write;
 
 use abd::populate_nodes_map;
 use anyhow::Context;
@@ -30,8 +30,6 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::builder().format_timestamp(None).init();
-
     let Args {
         iface,
         node_id,
@@ -44,6 +42,19 @@ async fn main() -> anyhow::Result<()> {
             "node_id must be between 1 and num_nodes (inclusive)"
         ));
     }
+
+    env_logger::builder()
+        .format(move |buf, record| {
+            writeln!(
+                buf,
+                "[{} {}{}] {}",
+                record.level(),
+                record.target(),
+                node_id,
+                record.args()
+            )
+        })
+        .init();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
