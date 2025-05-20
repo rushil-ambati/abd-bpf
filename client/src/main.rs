@@ -130,16 +130,16 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("🚀 {label} -> {}", server_addr.ip());
+    info!("{label} -> {}", server_addr.ip());
 
     let start = Instant::now();
     sock.send_to(&payload, server_addr)?;
-    debug!("↗ Sent {} bytes", payload.len());
+    debug!("Sent {} bytes", payload.len());
 
     let mut buf = [0u8; 1024];
     let (n, from) = sock.recv_from(&mut buf)?;
     let elapsed = start.elapsed();
-    debug!("↙  response ({n} bytes) from {from}");
+    debug!("Got ({n} bytes) from {from}");
 
     let archived = rkyv::access::<ArchivedAbdMsg, RkyvError>(&buf[..n])
         .map_err(|e| anyhow::anyhow!("deserialise: {e}"))?;
@@ -157,12 +157,12 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
             match received {
                 AbdMsgType::ReadAck => {
                     info!(
-                        "✅ R-ACK({}) from @{}, took={elapsed:?}",
+                        "R-ACK({}) from @{}, took={elapsed:?}",
                         resp.value, resp.sender
                     );
                 }
                 AbdMsgType::WriteAck => {
-                    info!("✅ W-ACK from @{}, took={elapsed:?}", resp.sender);
+                    info!("W-ACK from @{}, took={elapsed:?}", resp.sender);
                 }
                 _ => {}
             }
@@ -173,15 +173,12 @@ fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
         }
         Ok(unexpected) => {
             warn!(
-                "❌ Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
+                "Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
                 resp.sender
             );
         }
         Err(()) => {
-            warn!(
-                "❌ Unknown message type: {} from @{}",
-                resp.type_, resp.sender
-            );
+            warn!("Unknown message type: {} from @{}", resp.type_, resp.sender);
         }
     }
 }

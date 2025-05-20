@@ -18,35 +18,57 @@ bg_pids=()
 mkdir -p logs
 rm -f logs/*
 
-# Run command in background, tee its log, and stream to stdout
-# Each name must be unique, otherwise tail will truncate the log file
+# Run command in background, tee its log, optionally stream to stdout
+# Usage: run_bg [--no-tail] <name> <command...>
 run_bg() {
+  local tail=true
+  if [[ "$1" == "--no-tail" ]]; then
+    tail=false
+    shift
+  fi
+
   local name=$1
   shift
+
   local logfile="logs/${name}.log"
   : >"$logfile"
 
   "$@" >"$logfile" 2>&1 &
   bg_pids+=($!)
 
-  tail -F "$logfile" &
-  bg_pids+=($!)
+  if $tail; then
+    tail -F "$logfile" &
+    bg_pids+=($!)
+  fi
 }
 
-# Run a foreground command, tee its log, stream it live, and wait only for the command
-# Each name must be unique, otherwise tail will truncate the log file
+# Global arrays to track background PIDs and tailed logs
+declare -a bg_pids
+declare -A tailed_logs
+
+# Run a foreground command, tee its log, stream it live (optional), and wait only for the command
+# Usage: run_bg_and_wait [--no-tail] <name> <command...>
 run_bg_and_wait() {
+  local tail=true
+  if [[ "$1" == "--no-tail" ]]; then
+    tail=false
+    shift
+  fi
+
   local name=$1
   shift
   local logfile="logs/${name}.log"
-  : >"$logfile"
+  mkdir -p logs
+  : >>"$logfile"
 
-  # Tail in background
-  tail -F "$logfile" &
-  bg_pids+=($!)
+  if $tail && [[ ! -v tailed_logs["$logfile"] ]]; then
+    tail -F "$logfile" &
+    local tail_pid=$!
+    bg_pids+=("$tail_pid")
+    tailed_logs["$logfile"]=$tail_pid
+  fi
 
-  # Run the command in background
-  "$@" >"$logfile" 2>&1 &
+  "$@" >>"$logfile" 2>&1 &
   local cmd_pid=$!
   wait "$cmd_pid"
 }
@@ -85,7 +107,7 @@ else
   cargo build --release --quiet
 fi
 
-# Setup testenvs
+# Setup network namespaces
 for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/') writer; do
   "${TESTENV[@]}" setup --name "$env" --legacy-ip >/dev/null 2>&1 || true
 
@@ -94,54 +116,59 @@ for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/') writer; do
     bash -c "ethtool -K veth0 tx-checksum-ip-generic off >/dev/null 2>&1 || true"
 
   # Attach xdp-pass with warn-level logs
-  run_bg "veth0_$env" "${TESTENV[@]}" exec -n "$env" -- \
+  run_bg --no-tail "xdp_pass_$env" "${TESTENV[@]}" exec -n "$env" -- \
     bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
 done
 
-# Run servers
+# Run a server and reader on each node
 for i in $(seq 1 "$NUM_NODES"); do
   env="node$i"
-  run_bg "$env" sudo -E bash -c \
+
+  run_bg --no-tail "server$i" sudo -E bash -c \
     "RUST_LOG=info $TARGET_DIR/server \
+     --iface $env --num-nodes=$NUM_NODES --node-id $i"
+
+  run_bg --no-tail "reader$i" sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/reader \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 done
 
 # Run writer with info logging
-run_bg "writer" sudo -E bash -c \
+run_bg --no-tail "writer" sudo -E bash -c \
   "RUST_LOG=info $TARGET_DIR/writer \
    --iface writer --num-nodes=$NUM_NODES"
-
-# Run reader on node1
-run_bg "reader1" sudo -E bash -c \
-  "RUST_LOG=info $TARGET_DIR/reader \
-   --iface node1 --num-nodes=$NUM_NODES --node-id 1"
 
 # Wait for services to initialize
 sleep 1
 echo
 
-# Write
 writer_ip=$(
   "${TESTENV[@]}" -n writer status |
     awk '/Iface:/ {print $4}' |
     cut -d'/' -f1
 )
-run_bg_and_wait "client_write_42" "${TESTENV[@]}" exec -n writer -- bash -c "
-  RUST_LOG=info $TARGET_DIR/client write $writer_ip 42"
-echo
 
-run_bg_and_wait "client_write_69" "${TESTENV[@]}" exec -n writer -- bash -c "
-  RUST_LOG=info $TARGET_DIR/client write $writer_ip 69"
-echo
+declare -a values=(42 99 123)
+for val in "${values[@]}"; do
+  # Write
+  run_bg_and_wait "client" "${TESTENV[@]}" exec -n writer -- bash -c "
+    RUST_LOG=info $TARGET_DIR/client write $writer_ip $val"
+  echo
 
-# Read
-reader1_ip=$(
-  "${TESTENV[@]}" -n node1 status |
-    awk '/Iface:/ {print $4}' |
-    cut -d'/' -f1
-)
-run_bg_and_wait "client_read_0" "${TESTENV[@]}" exec -n node1 -- bash -c "
-  RUST_LOG=info $TARGET_DIR/client read $reader1_ip"
+  # Read from each node
+  for i in $(seq 1 "$NUM_NODES"); do
+    env="node$i"
+    reader_ip=$(
+      "${TESTENV[@]}" -n "$env" status |
+        awk '/Iface:/ {print $4}' |
+        cut -d'/' -f1
+    )
+
+    run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
+      RUST_LOG=info $TARGET_DIR/client read $reader_ip"
+    echo
+  done
+done
 
 # Leave the services running if requested
 if [[ "$WAIT_FOR_SERVICES" -eq 1 ]]; then
