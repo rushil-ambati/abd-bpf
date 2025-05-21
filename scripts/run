@@ -161,14 +161,14 @@ for val in "${values[@]}"; do
   # Read from each node
   for i in $(seq 1 "$NUM_NODES"); do
     env="node$i"
-    reader_ip=$(
+    node_ip=$(
       "${TESTENV[@]}" -n "$env" status |
         awk '/Iface:/ {print $4}' |
         cut -d'/' -f1
     )
 
     run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
-      RUST_LOG=info $TARGET_DIR/client read $reader_ip"
+      RUST_LOG=info $TARGET_DIR/client read $node_ip"
     echo
   done
 done

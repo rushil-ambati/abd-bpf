@@ -287,7 +287,7 @@ pub fn overwrite_seal<T>(seal: Seal<'_, T>, value: &T) {
 #[must_use]
 #[expect(clippy::inline_always)]
 #[inline(always)]
-pub fn read_global<T: Copy>(var: &'static T) -> T {
+pub fn read_global<T>(var: &'static T) -> T {
     unsafe { core::ptr::read_volatile(&raw const *var) }
 }
 

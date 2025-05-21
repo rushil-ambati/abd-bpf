@@ -47,6 +47,10 @@ struct CommonOpts {
     /// Tag value
     #[arg(short = 't', long)]
     tag: Option<u64>,
+
+    /// Use internal server port instead of node port
+    #[arg(long)]
+    server_mode: bool,
 }
 
 #[derive(Args, Debug)]
@@ -96,7 +100,12 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            let port = if opts.common.server_mode {
+                abd_common::constants::ABD_SERVER_UDP_PORT
+            } else {
+                ABD_UDP_PORT
+            };
+            (SocketAddrV4::new(server, port), msg, label)
         }
 
         Command::Read(opts) => {
@@ -124,7 +133,12 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            let port = if opts.common.server_mode {
+                abd_common::constants::ABD_SERVER_UDP_PORT
+            } else {
+                ABD_UDP_PORT
+            };
+            (SocketAddrV4::new(server, port), msg, label)
         }
     };
 
@@ -132,7 +146,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("{label} -> {}", server_addr.ip());
+    info!("{label} -> {}", server_addr);
 
     let start = Instant::now();
     sock.send_to(&payload, server_addr)?;
