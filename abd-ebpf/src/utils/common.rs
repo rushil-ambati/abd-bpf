@@ -6,7 +6,7 @@ use aya_ebpf::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
         TC_ACT_PIPE, TC_ACT_SHOT,
     },
-    maps::HashMap,
+    maps::Array,
     programs::{TcContext, XdpContext},
     EbpfContext,
 };
@@ -268,10 +268,10 @@ where
 /// - The type `T` must be `Copy` or otherwise safe to memcpy.
 #[allow(clippy::inline_always)]
 #[inline(always)]
-pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
+pub fn overwrite_seal<T>(seal: Seal<'_, T>, value: &T) {
     unsafe {
         copy_nonoverlapping(
-            core::ptr::from_ref(src).cast::<u8>(),
+            core::ptr::from_ref(value).cast::<u8>(),
             core::ptr::from_ref(seal.unseal_unchecked())
                 .cast::<u8>()
                 .cast_mut(),
@@ -287,71 +287,67 @@ pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
 #[must_use]
 #[expect(clippy::inline_always)]
 #[inline(always)]
-pub unsafe fn read_global<T: Copy>(var: &'static T) -> T {
-    core::ptr::read_volatile(&raw const *var)
+pub fn read_global<T: Copy>(var: &'static T) -> T {
+    unsafe { core::ptr::read_volatile(&raw const *var) }
 }
 
-/// Reads a value out of a `HashMap` at the given `key`, returning a default value if it is not found.
+/// Reads a value out of an `Array` map at the given `index`, returning a default value if it is not found.
 #[expect(clippy::inline_always)]
 #[inline(always)]
-pub fn map_get_or_default<K, V>(map: &HashMap<K, V>, key: &K) -> V
+pub fn map_get_or_default<V>(map: &Array<V>, index: u32) -> V
 where
-    K: Copy,
     V: Copy + Default,
 {
-    unsafe { map.get(key) }.map_or_else(V::default, |v| *v)
+    map.get(index).map_or_else(V::default, |v| *v)
 }
 
-/// Inserts a value into a `HashMap` at the given `key`.
+/// Inserts a value into an `Array` map at the given `key`.
 ///
 /// # Errors
 ///
 /// If the insertion fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
 #[expect(clippy::inline_always)]
 #[inline(always)]
-pub fn map_insert<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K, val: &V) -> BpfResult<()>
+pub fn map_update<C, V>(ctx: &C, map: &Array<V>, index: u32, new_value: &V) -> BpfResult<()>
 where
     C: PacketBuf,
 {
-    map.insert(key, val, 0).map_err(|_| {
-        error!(ctx, "Failed to insert into map");
+    let value_ptr_mut = map.get_ptr_mut(index).ok_or_else(|| {
+        error!(ctx, "Failed to get pointer to map");
         C::ABORT
-    })
+    })?;
+    unsafe {
+        copy_nonoverlapping(
+            new_value as *const V as *const u8,
+            value_ptr_mut.cast::<u8>(),
+            size_of::<V>(),
+        );
+    }
+    Ok(())
 }
 
-/// Increments a value in a `HashMap` at the given `key` by 1, returning the new value.
+/// Increments a value in an `Array` map at the given `index`, returning the new value.
 ///
 /// # Errors
 ///
 /// If the increment fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
 #[inline]
-pub fn map_increment<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K) -> BpfResult<V>
+pub fn map_increment<C, V>(ctx: &C, map: &Array<V>, index: u32) -> BpfResult<V>
 where
     C: PacketBuf,
-    K: Copy,
     V: Copy + core::ops::Add<Output = V> + From<u8> + Default,
 {
-    let val = map_get_or_default(map, key) + V::from(1);
-    map.insert(key, &val, 0).map_err(|_| {
-        error!(ctx, "Failed to increment map value");
+    let value_ptr_mut = map.get_ptr_mut(index).ok_or_else(|| {
+        error!(ctx, "Failed to get pointer to map");
         C::ABORT
     })?;
-    Ok(val)
-}
-
-/// Removes a value from a `HashMap` at the given `key`.
-///
-/// # Errors
-///
-/// If the removal fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
-#[inline]
-pub fn map_remove<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K) -> BpfResult<()>
-where
-    C: PacketBuf,
-    K: Copy,
-{
-    map.remove(key).map_err(|_| {
-        error!(ctx, "Failed to remove from map");
-        C::ABORT
-    })
+    let incremented_value = unsafe { *value_ptr_mut } + V::from(1);
+    unsafe {
+        copy_nonoverlapping(
+            &incremented_value as *const V as *const u8,
+            value_ptr_mut.cast::<u8>(),
+            size_of::<V>(),
+        );
+    }
+    Ok(incremented_value)
 }

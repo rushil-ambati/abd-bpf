@@ -9,15 +9,15 @@ use abd_common::{
 };
 use abd_ebpf::utils::{
     common::{
-        map_get_or_default, map_increment, map_insert, overwrite_seal, parse_abd_packet,
+        map_get_or_default, map_increment, map_update, overwrite_seal, parse_abd_packet,
         read_global, recompute_udp_csum_for_abd, AbdPacket, BpfResult,
     },
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
 use aya_ebpf::{
-    bindings::{TC_ACT_SHOT, TC_ACT_STOLEN},
+    bindings::{BPF_F_RDONLY_PROG, TC_ACT_SHOT, TC_ACT_STOLEN},
     macros::{classifier, map},
-    maps::{Array, HashMap},
+    maps::Array,
     programs::TcContext,
 };
 use aya_log_ebpf::{debug, error, info, warn};
@@ -33,29 +33,29 @@ static NODE_ID: u32 = 0;
 
 /// Node information - populated from userspace
 #[map]
-static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDONLY_PROG);
 
 /// Info about the client we're currently servicing
 #[map]
-static CLIENT_INFO: HashMap<u32, ClientInfo> = HashMap::with_max_entries(1, 0);
+static CLIENT_INFO: Array<ClientInfo> = Array::with_max_entries(1, 0);
 
 /// 0 = idle, 1/2 = Phase-1/2
 #[map]
-static STATUS: HashMap<u32, u8> = HashMap::with_max_entries(1, 0);
+static STATUS: Array<u8> = Array::with_max_entries(1, 0);
 
 /// Aggregation results from Phase-1
 #[map]
-static MAX_TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
+static MAX_TAG: Array<u64> = Array::with_max_entries(1, 0);
 #[map]
-static MAX_VALUE: HashMap<u32, ArchivedAbdValue> = HashMap::with_max_entries(1, 0);
+static MAX_VALUE: Array<ArchivedAbdValue> = Array::with_max_entries(1, 0);
 
 /// Monotonically-increasing
 #[map]
-static READ_COUNTER: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
+static READ_COUNTER: Array<u64> = Array::with_max_entries(1, 0);
 
 /// Acknowledgment count for current operation
 #[map]
-static ACK_COUNT: HashMap<u32, u64> = HashMap::with_max_entries(1, 0);
+static ACK_COUNT: Array<u64> = Array::with_max_entries(1, 0);
 
 #[allow(clippy::needless_pass_by_value)]
 #[classifier]
@@ -67,12 +67,12 @@ pub fn reader(ctx: TcContext) -> i32 {
 }
 
 fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
-    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    let num_nodes = read_global(&NUM_NODES);
     if num_nodes == 0 {
         error!(ctx, "Number of nodes is not set");
         return Err(TC_ACT_SHOT.into());
     }
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     if my_id == 0 {
         error!(ctx, "Node ID is not set");
         return Err(TC_ACT_SHOT.into());
@@ -108,27 +108,27 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     info!(ctx, "READ from client");
 
     // busy?
-    if map_get_or_default(&STATUS, &0) != 0 {
+    if map_get_or_default(&STATUS, 0) != 0 {
         return Ok(TC_ACT_SHOT);
     }
 
     // initialise Phase-1 state
-    map_insert(ctx, &STATUS, &0, &1)?;
-    map_insert(ctx, &MAX_TAG, &0, &0)?;
-    map_insert(ctx, &ACK_COUNT, &0, &0)?;
+    map_update(ctx, &STATUS, 0, &1)?;
+    map_update(ctx, &MAX_TAG, 0, &0)?;
+    map_update(ctx, &ACK_COUNT, 0, &0)?;
 
     // remember client
     store_client_info(ctx, &CLIENT_INFO, &pkt)
         .inspect_err(|_| error!(ctx, "Failed to store client info"))?;
 
     // increment read counter
-    let new_rc = map_increment(ctx, &READ_COUNTER, &0)?;
+    let new_rc = map_increment(ctx, &READ_COUNTER, 0)?;
 
     // set ABD message values in-place
     munge!(let ArchivedAbdMessage { mut counter, mut sender, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -137,7 +137,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     pkt.udph.check = udp_csum;
 
-    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    let num_nodes = read_global(&NUM_NODES);
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes)
         .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
@@ -147,7 +147,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
 
-    if map_get_or_default(&STATUS, &0) != 1 {
+    if map_get_or_default(&STATUS, 0) != 1 {
         debug!(
             ctx,
             "Dropping R-ACK from @{} (tag={}) - not in Phase-1",
@@ -158,7 +158,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     }
 
     // ensure the ACK is for the current operation
-    let rc = map_get_or_default(&READ_COUNTER, &0);
+    let rc = map_get_or_default(&READ_COUNTER, 0);
     if counter.to_native() != rc {
         warn!(
             ctx,
@@ -177,17 +177,17 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     // bump ack counter
-    let acks = map_increment(ctx, &ACK_COUNT, &0)?;
+    let acks = map_increment(ctx, &ACK_COUNT, 0)?;
 
     // update max tag & value
-    let max_tag = map_get_or_default(&MAX_TAG, &0);
+    let max_tag = map_get_or_default(&MAX_TAG, 0);
     if tag.to_native() > max_tag {
-        map_insert(ctx, &MAX_TAG, &0, &tag.to_native())?;
-        map_insert(ctx, &MAX_VALUE, &0, &value)?;
+        map_update(ctx, &MAX_TAG, 0, &tag.to_native())?;
+        map_update(ctx, &MAX_VALUE, 0, &value)?;
     }
 
     // check if we have enough ACKs
-    let majority = u64::from(((unsafe { read_global(&NUM_NODES) }) >> 1) + 1);
+    let majority = u64::from(((read_global(&NUM_NODES)) >> 1) + 1);
     if acks < majority {
         info!(
             ctx,
@@ -199,20 +199,20 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     info!(ctx, "Phase-1 complete, majority ({}) reached", majority);
 
     // proceed to Phase-2
-    map_insert(ctx, &STATUS, &0, &2)?;
+    map_update(ctx, &STATUS, 0, &2)?;
     let new_rc = rc + 1;
-    map_insert(ctx, &READ_COUNTER, &0, &new_rc)?;
-    map_insert(ctx, &ACK_COUNT, &0, &0)?;
+    map_update(ctx, &READ_COUNTER, 0, &new_rc)?;
+    map_update(ctx, &ACK_COUNT, 0, &0)?;
 
     // craft the WRITE message
-    let max_tag = map_get_or_default(&MAX_TAG, &0);
-    let max_value = unsafe { MAX_VALUE.get(&0) }.ok_or_else(|| {
+    let max_tag = map_get_or_default(&MAX_TAG, 0);
+    let max_value = MAX_VALUE.get(0).ok_or_else(|| {
         error!(ctx, "Failed to get value");
         TC_ACT_SHOT
     })?;
     let mut csum = pkt.udph.check;
 
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut csum)?;
     *sender = my_id.into();
 
@@ -232,7 +232,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     info!(ctx, "Phase-2: propagate tag={}", max_tag);
 
-    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    let num_nodes = read_global(&NUM_NODES);
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes)
         .map(|()| TC_ACT_STOLEN)
         .inspect_err(|_| error!(ctx, "Failed to broadcast READ request"))
@@ -240,7 +240,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
 /// Handle a W-ACK from a replica (Phase-2)
 fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    if map_get_or_default(&STATUS, &0) != 2 {
+    if map_get_or_default(&STATUS, 0) != 2 {
         debug!(
             ctx,
             "Dropping W-ACK from @{} - not in Phase-2",
@@ -250,7 +250,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     }
 
     let counter = pkt.msg.counter.to_native();
-    let rc = map_get_or_default(&READ_COUNTER, &0);
+    let rc = map_get_or_default(&READ_COUNTER, 0);
     if counter != rc {
         warn!(
             ctx,
@@ -265,8 +265,8 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         pkt.msg.sender.to_native(),
     );
 
-    let acks = map_increment(ctx, &ACK_COUNT, &0)?;
-    let majority = (unsafe { read_global(&NUM_NODES) } >> 1) + 1;
+    let acks = map_increment(ctx, &ACK_COUNT, 0)?;
+    let majority = (read_global(&NUM_NODES) >> 1) + 1;
     if acks < u64::from(majority) {
         info!(
             ctx,
@@ -281,8 +281,8 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     );
 
     // clean up
-    map_insert(ctx, &STATUS, &0, &0)?;
-    map_insert(ctx, &ACK_COUNT, &0, &0)?;
+    map_update(ctx, &STATUS, 0, &0)?;
+    map_update(ctx, &ACK_COUNT, 0, &0)?;
 
     send_read_ack_to_client(ctx, pkt).inspect_err(|_| error!(ctx, "Failed to send R-ACK to client"))
 }
@@ -291,8 +291,8 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
 
-    let max_tag = map_get_or_default(&MAX_TAG, &0);
-    let max_value = unsafe { MAX_VALUE.get(&0) }.ok_or_else(|| {
+    let max_tag = map_get_or_default(&MAX_TAG, 0);
+    let max_value = MAX_VALUE.get(0).ok_or_else(|| {
         error!(ctx, "Failed to get value");
         TC_ACT_SHOT
     })?;
@@ -300,7 +300,7 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     // set ABD message values in-place
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
@@ -318,7 +318,7 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
     pkt.udph.check = udp_csum;
 
-    let client = unsafe { CLIENT_INFO.get(&0) }.ok_or_else(|| {
+    let client = CLIENT_INFO.get(0).ok_or_else(|| {
         error!(ctx, "Failed to get client info");
         TC_ACT_SHOT
     })?;

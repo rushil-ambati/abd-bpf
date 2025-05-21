@@ -10,14 +10,17 @@ use abd_common::{
     value::ArchivedAbdValue,
 };
 use abd_ebpf::utils::common::{
-    map_get_or_default, map_insert, overwrite_seal, parse_abd_packet, read_global,
+    map_get_or_default, map_update, overwrite_seal, parse_abd_packet, read_global,
     recompute_udp_csum_for_abd, AbdPacket, BpfResult,
 };
 use aya_ebpf::{
-    bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
+    bindings::{
+        xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
+        BPF_F_RDONLY_PROG,
+    },
     helpers::gen::bpf_redirect,
     macros::{map, xdp},
-    maps::{Array, HashMap},
+    maps::Array,
     programs::XdpContext,
 };
 use aya_log_ebpf::{debug, error, info, warn};
@@ -34,19 +37,19 @@ static NODE_ID: u32 = 0;
 
 /// Node information - populated from userspace
 #[map]
-static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, 0);
+static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDONLY_PROG);
 
 /// Current tag (timestamp) for the stored value
 #[map]
-static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
+static TAG: Array<u64> = Array::with_max_entries(1, 0); // key = 0
 
 /// Current stored value
 #[map]
-static VALUE: HashMap<u32, ArchivedAbdValue> = HashMap::with_max_entries(1, 0); // key = 0
+static VALUE: Array<ArchivedAbdValue> = Array::with_max_entries(1, 0); // key = 0
 
 /// Per-node request counter
 #[map]
-static COUNTERS: HashMap<u32, u64> = HashMap::with_max_entries(ABD_MAX_NODES, 0);
+static COUNTERS: Array<u64> = Array::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Small struct for “where to send the reply”
 #[derive(Clone, Copy)]
@@ -65,12 +68,12 @@ pub fn server(ctx: XdpContext) -> u32 {
 }
 
 fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
-    let num_nodes = unsafe { read_global(&NUM_NODES) };
+    let num_nodes = read_global(&NUM_NODES);
     if num_nodes == 0 {
         error!(ctx, "Number of nodes is not set");
         return Err(XDP_ABORTED.into());
     }
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     if my_id == 0 {
         error!(ctx, "Node ID is not set");
         return Err(XDP_ABORTED.into());
@@ -106,8 +109,8 @@ fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     info!(ctx, "READ from @{}", sender);
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    let tag = map_get_or_default(&TAG, &0);
-    let value = unsafe { VALUE.get(&0) }.ok_or_else(|| {
+    let tag = map_get_or_default(&TAG, 0);
+    let value = VALUE.get(0).ok_or_else(|| {
         error!(ctx, "Failed to get value");
         XDP_ABORTED
     })?;
@@ -146,7 +149,7 @@ fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
 #[allow(clippy::inline_always)]
 #[inline(always)]
 fn update_sender_counter_if_newer(ctx: &XdpContext, sender: u32, counter: u64) -> BpfResult<()> {
-    let sender_counter = map_get_or_default(&COUNTERS, &sender);
+    let sender_counter = map_get_or_default(&COUNTERS, sender);
     if counter <= sender_counter {
         warn!(
             ctx,
@@ -154,7 +157,7 @@ fn update_sender_counter_if_newer(ctx: &XdpContext, sender: u32, counter: u64) -
         );
         return Err(XDP_DROP.into());
     }
-    map_insert(ctx, &COUNTERS, &sender, &counter)
+    map_update(ctx, &COUNTERS, sender, &counter)
 }
 
 /// Stores new tag and value if tag is newer
@@ -165,10 +168,10 @@ fn store_tag_and_value_if_newer(
     tag: u64,
     value: &ArchivedAbdValue,
 ) -> BpfResult<()> {
-    let current_tag = map_get_or_default(&TAG, &0);
+    let current_tag = map_get_or_default(&TAG, 0);
     if tag > current_tag {
-        map_insert(ctx, &TAG, &0, &tag)?;
-        map_insert(ctx, &VALUE, &0, value)?;
+        map_update(ctx, &TAG, 0, &tag)?;
+        map_update(ctx, &VALUE, 0, value)?;
     } else {
         debug!(
             ctx,
@@ -192,7 +195,7 @@ fn construct_and_send_ack(
     munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
-    let my_id = unsafe { read_global(&NODE_ID) };
+    let my_id = read_global(&NODE_ID);
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
