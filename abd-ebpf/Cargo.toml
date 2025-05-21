@@ -12,6 +12,10 @@ aya-log-ebpf = { workspace = true }
 network-types = "0.0.7"
 rkyv = { workspace = true }
 
+[features]
+default = []     # set this to l4_checksum to enable UDP checksum recalculation
+l4_checksum = []
+
 [build-dependencies]
 which = { workspace = true }
 

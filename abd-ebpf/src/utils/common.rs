@@ -6,12 +6,11 @@ use aya_ebpf::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
         TC_ACT_PIPE, TC_ACT_SHOT,
     },
-    helpers::r#gen::bpf_csum_diff,
     maps::HashMap,
     programs::{TcContext, XdpContext},
     EbpfContext,
 };
-use aya_log_ebpf::{error, info};
+use aya_log_ebpf::error;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -161,12 +160,14 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     })
 }
 
+#[cfg(feature = "l4_checksum")]
 /// Recomputes the UDP checksum for a modification to the ABD message.
 ///
 /// The existing checksum should be passed in as `udp_csum` and it will be updated with the new checksum.
 /// After all modifications, the checksum should be written back to the UDP header by the caller.
 ///
 /// The offset where `field` is located must have at least 4 bytes of space after it.
+/// The size of `T` must be a multiple of 4 bytes, and be less than 256 bytes.
 ///
 /// # Errors
 ///
@@ -181,6 +182,9 @@ pub fn recompute_udp_csum_for_abd<C, T>(
 where
     C: PacketBuf,
 {
+    use aya_ebpf::helpers::r#gen::bpf_csum_diff;
+    use aya_log_ebpf::info;
+
     let size = u32::try_from(size_of::<T>()).map_err(|_| {
         error!(
             ctx,
@@ -222,6 +226,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "l4_checksum")]
 /// Converts a checksum into u16
 #[inline]
 fn csum_fold_helper(mut csum: u64) -> u16 {
@@ -234,18 +239,42 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
     return !(csum as u16);
 }
 
+#[cfg(not(feature = "l4_checksum"))]
+/// Feature-gated version of `recompute_udp_csum_for_abd`
+/// that simply disables the UDP checksum.
+///
+/// # Errors
+///
+/// Cannot fail.
+#[inline]
+pub const fn recompute_udp_csum_for_abd<C, T>(
+    _ctx: &C,
+    _field: &Seal<'_, T>,
+    _new_val: &T,
+    udp_csum: &mut u16,
+) -> BpfResult<()>
+where
+    C: PacketBuf,
+{
+    *udp_csum = 0;
+    Ok(())
+}
+
 /// Copies the contents of `src` into a sealed destination `Seal<'_, T>`.
 ///
 /// # Safety
 ///
 /// - The caller must ensure `seal` is valid and properly sized.
 /// - The type `T` must be `Copy` or otherwise safe to memcpy.
+#[allow(clippy::inline_always)]
 #[inline(always)]
 pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
     unsafe {
         copy_nonoverlapping(
             core::ptr::from_ref(src).cast::<u8>(),
-            core::ptr::from_ref(seal.unseal_unchecked()).cast::<u8>() as *mut u8,
+            core::ptr::from_ref(seal.unseal_unchecked())
+                .cast::<u8>()
+                .cast_mut(),
             size_of::<T>(),
         );
     }

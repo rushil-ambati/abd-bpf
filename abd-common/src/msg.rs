@@ -53,7 +53,8 @@ impl AbdMessage {
 }
 
 /// Enum representing the type of ABD protocol message.
-/// We don't use rkyv here because we want to use the enum as a u32 (so we can bpf_csum_diff on it)
+///
+/// We don't use rkyv here because we want to use the enum as a u32 (so we can `bpf_csum_diff` on it)
 /// See <https://github.com/rkyv/rkyv/issues/482#issuecomment-2351618161>
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]

@@ -24,7 +24,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Write a new value
-    Write(WriteOpts),
+    Write(Box<WriteOpts>),
 
     /// Read the stored value
     Read(ReadOpts),
@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
             let tag = opts.common.tag.unwrap_or(0);
 
             let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.value);
-            let mut label = format!("WRITE({:?})", opts.value);
+            let mut label = format!("WRITE({})", opts.value);
 
             if opts.common.tag.is_some() {
                 let _ = write!(label, " tag={tag}");
@@ -138,7 +138,7 @@ fn main() -> anyhow::Result<()> {
     sock.send_to(&payload, server_addr)?;
     debug!("Sent {} bytes", payload.len());
 
-    let mut buf = [0u8; 1024];
+    let mut buf = vec![0u8; 65_535].into_boxed_slice();
     let (n, from) = sock.recv_from(&mut buf)?;
     let elapsed = start.elapsed();
     debug!("Got ({n} bytes) from {from}");
@@ -159,7 +159,7 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
             match received {
                 AbdMessageType::ReadAck => {
                     info!(
-                        "R-ACK({:?}) from @{}, took={elapsed:?}",
+                        "R-ACK({}) from @{}, took={elapsed:?}",
                         resp.value, resp.sender
                     );
                 }
