@@ -1,10 +1,17 @@
 #![no_std]
 #![no_main]
 
-use abd_common::{AbdMsgType, ArchivedAbdMsg, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT};
+use core::mem::swap;
+
+use abd_common::{
+    constants::{ABD_MAX_NODES, ABD_SERVER_UDP_PORT},
+    maps::NodeInfo,
+    msg::{AbdMessageType, ArchivedAbdMessage},
+    value::ArchivedAbdValue,
+};
 use abd_ebpf::utils::common::{
-    map_get_or_default, map_insert, parse_abd_packet, read_global, update_abd_msg_field, AbdPacket,
-    BpfResult,
+    map_get_or_default, map_insert, overwrite_seal, parse_abd_packet, read_global,
+    recompute_udp_csum_for_abd, AbdPacket, BpfResult,
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
@@ -35,11 +42,11 @@ static TAG: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
 
 /// Current stored value
 #[map]
-static VALUE: HashMap<u32, u64> = HashMap::with_max_entries(1, 0); // key = 0
+static VALUE: HashMap<u32, ArchivedAbdValue> = HashMap::with_max_entries(1, 0); // key = 0
 
 /// Per-node request counter
 #[map]
-static COUNTERS: HashMap<u32, u64> = HashMap::<u32, u64>::with_max_entries(ABD_MAX_NODES, 0);
+static COUNTERS: HashMap<u32, u64> = HashMap::with_max_entries(ABD_MAX_NODES, 0);
 
 /// Small struct for “where to send the reply”
 #[derive(Clone, Copy)]
@@ -73,17 +80,19 @@ fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
 
     let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
+    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
         error!(ctx, "Invalid message type {} from @{}", msg_type, sender);
         XDP_ABORTED
     })?;
     match parsed_msg_type {
-        AbdMsgType::Read => handle_read(ctx, pkt),
-        AbdMsgType::Write => handle_write(ctx, pkt),
+        AbdMessageType::Read => handle_read(ctx, pkt),
+        AbdMessageType::Write => handle_write(ctx, pkt),
         _ => {
             warn!(
                 ctx,
-                "Received unexpected message type {} from @{}, dropping...", msg_type, sender
+                "Received unexpected message type {} from @{}, dropping...",
+                msg_type as u32,
+                sender
             );
             Ok(XDP_DROP)
         }
@@ -98,12 +107,15 @@ fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
     let tag = map_get_or_default(&TAG, &0);
-    let value = map_get_or_default(&VALUE, &0);
+    let value = unsafe { VALUE.get(&0) }.ok_or_else(|| {
+        error!(ctx, "Failed to get value");
+        XDP_ABORTED
+    })?;
 
     construct_and_send_ack(
         ctx,
         pkt,
-        AbdMsgType::ReadAck,
+        AbdMessageType::ReadAck,
         Some(tag),
         Some(value),
         lookup_dest(ctx, sender)?,
@@ -118,14 +130,12 @@ fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
     let tag = pkt.msg.tag.to_native();
-    let value = pkt.msg.value.to_native();
-
-    store_tag_and_value_if_newer(ctx, tag, value)?;
+    store_tag_and_value_if_newer(ctx, tag, &pkt.msg.value)?;
 
     construct_and_send_ack(
         ctx,
         pkt,
-        AbdMsgType::WriteAck,
+        AbdMessageType::WriteAck,
         None,
         None,
         lookup_dest(ctx, sender)?,
@@ -150,11 +160,15 @@ fn update_sender_counter_if_newer(ctx: &XdpContext, sender: u32, counter: u64) -
 /// Stores new tag and value if tag is newer
 #[allow(clippy::inline_always)]
 #[inline(always)]
-fn store_tag_and_value_if_newer(ctx: &XdpContext, tag: u64, value: u64) -> BpfResult<()> {
+fn store_tag_and_value_if_newer(
+    ctx: &XdpContext,
+    tag: u64,
+    value: &ArchivedAbdValue,
+) -> BpfResult<()> {
     let current_tag = map_get_or_default(&TAG, &0);
     if tag > current_tag {
         map_insert(ctx, &TAG, &0, &tag)?;
-        map_insert(ctx, &VALUE, &0, &value)?;
+        map_insert(ctx, &VALUE, &0, value)?;
     } else {
         debug!(
             ctx,
@@ -170,23 +184,29 @@ fn store_tag_and_value_if_newer(ctx: &XdpContext, tag: u64, value: u64) -> BpfRe
 fn construct_and_send_ack(
     ctx: &XdpContext,
     pkt: AbdPacket,
-    new_type: AbdMsgType,
+    new_type: AbdMessageType,
     new_tag: Option<u64>,
-    new_value: Option<u64>,
+    new_value: Option<&ArchivedAbdValue>,
     dest: Dest,
 ) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, mut value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut type_, new_type.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
+
+    recompute_udp_csum_for_abd(ctx, &type_, &new_type.into(), &mut udp_csum)?;
+    *type_ = new_type.into();
 
     if let Some(new_tag) = new_tag {
-        update_abd_msg_field(ctx, &mut tag, new_tag.into(), &mut udp_csum)?;
+        recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
+        *tag = new_tag.into();
     }
+
     if let Some(new_value) = new_value {
-        update_abd_msg_field(ctx, &mut value, new_value.into(), &mut udp_csum)?;
+        recompute_udp_csum_for_abd(ctx, &value, new_value, &mut udp_csum)?;
+        overwrite_seal(value, new_value);
     }
 
     pkt.udph.check = udp_csum;
@@ -217,11 +237,11 @@ fn redirect_to_dest(
     dest: Dest,
 ) -> BpfResult<u32> {
     // swap UDP ports and IPs
-    core::mem::swap(&mut udph.source, &mut udph.dest);
-    core::mem::swap(&mut iph.src_addr, &mut iph.dst_addr);
+    swap(&mut udph.source, &mut udph.dest);
+    swap(&mut iph.src_addr, &mut iph.dst_addr);
 
     // swap MACs and set the destination MAC to the destination node
-    core::mem::swap(&mut eth.src_addr, &mut eth.dst_addr);
+    swap(&mut eth.src_addr, &mut eth.dst_addr);
     eth.dst_addr.copy_from_slice(&dest.mac);
 
     info!(

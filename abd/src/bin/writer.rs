@@ -1,5 +1,5 @@
 use abd::populate_nodes_map;
-use abd_common::ABD_WRITER_ID;
+use abd_common::constants::ABD_WRITER_ID;
 use aya::{
     programs::{tc, SchedClassifier, TcAttachType},
     EbpfLoader,

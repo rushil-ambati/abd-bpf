@@ -2,12 +2,14 @@
 #![no_main]
 
 use abd_common::{
-    AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID,
+    constants::{ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID},
+    maps::{ClientInfo, NodeInfo},
+    msg::{AbdMessageType, ArchivedAbdMessage},
 };
 use abd_ebpf::utils::{
     common::{
         map_get_or_default, map_increment, map_insert, parse_abd_packet, read_global,
-        update_abd_msg_field, AbdPacket, BpfResult,
+        recompute_udp_csum_for_abd, AbdPacket, BpfResult,
     },
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
@@ -76,17 +78,19 @@ fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
     let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
     let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
+    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
         error!(ctx, "Invalid message type {} from {}", msg_type, sender);
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
-        AbdMsgType::Write => handle_client_write(ctx, pkt),
-        AbdMsgType::WriteAck => handle_write_ack(ctx, pkt),
+        AbdMessageType::Write => handle_client_write(ctx, pkt),
+        AbdMessageType::WriteAck => handle_write_ack(ctx, pkt),
         _ => {
             warn!(
                 ctx,
-                "Received unexpected message type: {} from @{}, dropping...", msg_type, sender
+                "Received unexpected message type: {} from @{}, dropping...",
+                msg_type as u32,
+                sender
             );
             Ok(TC_ACT_SHOT)
         }
@@ -100,7 +104,7 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
         return Ok(TC_ACT_SHOT);
     }
 
-    info!(ctx, "WRITE({}) from client", pkt.msg.value.to_native());
+    info!(ctx, "WRITE from client");
 
     map_insert(ctx, &ACTIVE, &0, &true)?;
     map_insert(ctx, &ACK_COUNT, &0, &0)?;
@@ -113,12 +117,19 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     let new_wc = map_increment(ctx, &WRITE_COUNTER, &0)?;
 
     // set ABD message values in-place
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
+
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut tag, new_tag.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut counter, new_wc.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
+
+    recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
+    *tag = new_tag.into();
+
+    recompute_udp_csum_for_abd(ctx, &counter, &new_wc.into(), &mut udp_csum)?;
+    *counter = new_wc.into();
+
     pkt.udph.check = udp_csum;
 
     let num_nodes = unsafe { read_global(&NUM_NODES) };
@@ -174,16 +185,20 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
 /// After write commit, send a W-ACK back to original client
 fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
 
     // set ABD message values in-place (clearing internal fields)
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
-    update_abd_msg_field(ctx, &mut sender, my_id.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut tag, 0.into(), &mut udp_csum)?;
-    update_abd_msg_field(ctx, &mut counter, 0.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    *sender = my_id.into();
 
+    recompute_udp_csum_for_abd(ctx, &tag, &0.into(), &mut udp_csum)?;
+    *tag = 0.into();
+
+    recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;
+    *counter = 0.into();
     pkt.udph.check = udp_csum;
 
     let client = unsafe { CLIENT_INFO.get(&0) }.ok_or_else(|| {

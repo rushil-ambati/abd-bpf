@@ -1,12 +1,11 @@
-use core::mem::{offset_of, size_of};
+use core::{mem::offset_of, ptr::copy_nonoverlapping};
 
-use abd_common::{ArchivedAbdMsg, ABD_MAGIC};
+use abd_common::{constants::ABD_MAGIC, msg::ArchivedAbdMessage};
 use aya_ebpf::{
     bindings::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
         TC_ACT_PIPE, TC_ACT_SHOT,
     },
-    helpers::r#gen::bpf_csum_diff,
     maps::HashMap,
     programs::{TcContext, XdpContext},
     EbpfContext,
@@ -17,7 +16,7 @@ use network_types::{
     ip::{IpProto, Ipv4Hdr},
     udp::UdpHdr,
 };
-use rkyv::{access_unchecked_mut, seal::Seal, traits::NoUndef};
+use rkyv::{access_unchecked_mut, seal::Seal};
 
 pub const ETH_SRC_OFF: usize = offset_of!(EthHdr, src_addr);
 pub const ETH_DST_OFF: usize = offset_of!(EthHdr, dst_addr);
@@ -82,7 +81,7 @@ impl PacketBuf for TcContext {
 pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
     let start = ctx.data();
     let end = ctx.data_end();
-    let len = core::mem::size_of::<T>();
+    let len = size_of::<T>();
 
     if start + offset + len > end {
         return Err(C::ABORT);
@@ -95,7 +94,7 @@ pub struct AbdPacket<'a> {
     pub eth: &'a mut EthHdr,
     pub iph: &'a mut Ipv4Hdr,
     pub udph: &'a mut UdpHdr,
-    pub msg: Seal<'a, ArchivedAbdMsg>,
+    pub msg: Seal<'a, ArchivedAbdMessage>,
 }
 
 /// Parse an ABD packet from a context
@@ -127,8 +126,8 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     }
     let udph = unsafe { &mut *udph_ptr };
 
-    // Bounds-check that the payload is exactly ArchivedAbdMsg
-    let msg_len = size_of::<ArchivedAbdMsg>();
+    // Bounds-check that the payload is exactly ArchivedAbdMessage
+    let msg_len = size_of::<ArchivedAbdMessage>();
     let start = ctx.data();
     let end = ctx.data_end();
     if start + UDP_PAYLOAD_OFF + msg_len > end {
@@ -138,7 +137,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     // Get a &mut [u8] pointing to the message bytes
     let msg_ptr = (start + UDP_PAYLOAD_OFF) as *mut u8;
     let slice = unsafe { core::slice::from_raw_parts_mut(msg_ptr, msg_len) };
-    let msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(slice) };
+    let msg = unsafe { access_unchecked_mut::<ArchivedAbdMessage>(slice) };
 
     // Check the magic number
     let magic = msg.magic;
@@ -161,30 +160,32 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     })
 }
 
-/// Updates a field in the ABD message and recomputes the UDP checksum.
+#[cfg(feature = "l4_checksum")]
+/// Recomputes the UDP checksum for a modification to the ABD message.
 ///
 /// The existing checksum should be passed in as `udp_csum` and it will be updated with the new checksum.
 /// After all modifications, the checksum should be written back to the UDP header by the caller.
+///
+/// The offset where `field` is located must have at least 4 bytes of space after it.
+/// The size of `T` must be a multiple of 4 bytes, and be less than 256 bytes.
 ///
 /// # Errors
 ///
 /// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
 #[inline]
-pub fn update_abd_msg_field<C, T>(
+pub fn recompute_udp_csum_for_abd<C, T>(
     ctx: &C,
-    field: &mut Seal<'_, T>,
-    new_val: T,
+    field: &Seal<'_, T>,
+    new_val: &T,
     udp_csum: &mut u16,
 ) -> BpfResult<()>
 where
     C: PacketBuf,
-    T: PartialEq + Copy + NoUndef + Unpin,
 {
-    if **field == new_val {
-        return Ok(()); // no change
-    }
+    use aya_ebpf::helpers::r#gen::bpf_csum_diff;
+    use aya_log_ebpf::info;
 
-    let from_size = u32::try_from(size_of::<T>()).map_err(|_| {
+    let size = u32::try_from(size_of::<T>()).map_err(|_| {
         error!(
             ctx,
             "failed to convert size of {} ({}) to u32",
@@ -193,22 +194,20 @@ where
         );
         C::ABORT
     })?;
-    let to_size = u32::try_from(size_of::<T>()).map_err(|_| {
-        error!(
-            ctx,
-            "failed to convert size of {} ({}) to u32",
-            core::any::type_name::<T>(),
-            size_of::<T>()
-        );
-        C::ABORT
-    })?;
+
+    info!(
+        ctx,
+        "Recomputing UDP checksum for {}: size {}",
+        core::any::type_name::<T>(),
+        size,
+    );
 
     let ret = unsafe {
         bpf_csum_diff(
             &raw const **field as *mut u32,
-            from_size,
-            &raw const new_val as *mut u32,
-            to_size,
+            size,
+            &raw const *new_val as *mut u32,
+            size,
             !u32::from(*udp_csum),
         )
     };
@@ -224,12 +223,10 @@ where
     let new_csum = csum_fold_helper(ret as u64);
     *udp_csum = new_csum;
 
-    // Update the field with the new value
-    **field = new_val;
-
     Ok(())
 }
 
+#[cfg(feature = "l4_checksum")]
 /// Converts a checksum into u16
 #[inline]
 fn csum_fold_helper(mut csum: u64) -> u16 {
@@ -242,11 +239,55 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
     return !(csum as u16);
 }
 
-/// Reads a global variable `var` from within a BPF program.
-#[expect(clippy::inline_always, clippy::missing_safety_doc)]
-#[must_use]
+#[cfg(not(feature = "l4_checksum"))]
+/// Feature-gated version of `recompute_udp_csum_for_abd`
+/// that simply disables the UDP checksum.
+///
+/// # Errors
+///
+/// Cannot fail.
+#[inline]
+pub const fn recompute_udp_csum_for_abd<C, T>(
+    _ctx: &C,
+    _field: &Seal<'_, T>,
+    _new_val: &T,
+    udp_csum: &mut u16,
+) -> BpfResult<()>
+where
+    C: PacketBuf,
+{
+    *udp_csum = 0;
+    Ok(())
+}
+
+/// Copies the contents of `src` into a sealed destination `Seal<'_, T>`.
+///
+/// # Safety
+///
+/// - The caller must ensure `seal` is valid and properly sized.
+/// - The type `T` must be `Copy` or otherwise safe to memcpy.
+#[allow(clippy::inline_always)]
 #[inline(always)]
-pub unsafe fn read_global(var: &'static u32) -> u32 {
+pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
+    unsafe {
+        copy_nonoverlapping(
+            core::ptr::from_ref(src).cast::<u8>(),
+            core::ptr::from_ref(seal.unseal_unchecked())
+                .cast::<u8>()
+                .cast_mut(),
+            size_of::<T>(),
+        );
+    }
+}
+
+/// Reads a global variable `var` from within a BPF program using a volatile load.
+///
+/// # Safety
+/// The caller must ensure that `var` is a valid pointer to a static variable.
+#[must_use]
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub unsafe fn read_global<T: Copy>(var: &'static T) -> T {
     core::ptr::read_volatile(&raw const *var)
 }
 
@@ -271,8 +312,6 @@ where
 pub fn map_insert<C, K, V>(ctx: &C, map: &HashMap<K, V>, key: &K, val: &V) -> BpfResult<()>
 where
     C: PacketBuf,
-    K: Copy,
-    V: Copy,
 {
     map.insert(key, val, 0).map_err(|_| {
         error!(ctx, "Failed to insert into map");

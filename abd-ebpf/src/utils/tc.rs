@@ -1,8 +1,11 @@
 use core::net::Ipv4Addr;
 
-use abd_common::{ClientInfo, NodeInfo, ABD_SERVER_UDP_PORT, ABD_UDP_PORT};
+use abd_common::{
+    constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
+    maps::{ClientInfo, NodeInfo},
+};
 use aya_ebpf::{
-    bindings::{BPF_F_PSEUDO_HDR, TC_ACT_REDIRECT, TC_ACT_SHOT},
+    bindings::{TC_ACT_REDIRECT, TC_ACT_SHOT},
     helpers::r#gen::{bpf_redirect, bpf_skb_store_bytes},
     maps::{Array, HashMap},
     programs::TcContext,
@@ -171,6 +174,7 @@ fn update_udp_port(ctx: &TcContext, offset: usize, port: u16) -> BpfResult<()> {
         return Ok(());
     }
 
+    #[cfg(feature = "l4_checksum")]
     ctx.l4_csum_replace(
         UDPH_CSUM_OFF,
         u64::from(old_port),
@@ -181,6 +185,8 @@ fn update_udp_port(ctx: &TcContext, offset: usize, port: u16) -> BpfResult<()> {
         error!(ctx, "Failed to update the UDP checksum: {}", e);
         TC_ACT_SHOT
     })?;
+    #[cfg(not(feature = "l4_checksum"))]
+    skb_store(ctx, UDPH_CSUM_OFF, &0u16, 0)?;
 
     skb_store(ctx, offset, &port.to_be(), 0).inspect_err(|e| {
         error!(
@@ -235,23 +241,26 @@ fn set_ipv4_addr(ctx: &TcContext, offset: usize, ip: Ipv4Addr) -> BpfResult<()> 
         return Ok(());
     }
 
+    #[cfg(feature = "l4_checksum")]
     // note: the IP address is part of the UDP pseudo header, hence BPF_F_PSEUDO_HDR is used
     ctx.l4_csum_replace(
         UDPH_CSUM_OFF,
         u64::from(old_ip),
         u64::from(new_ip),
-        u64::from(BPF_F_PSEUDO_HDR) | (size_of_val(&new_ip) as u64),
+        u64::from(aya_ebpf::bindings::BPF_F_PSEUDO_HDR) | (size_of_val(&new_ip) as u64),
     )
     .map_err(|e| {
         error!(ctx, "Failed to update the UDP checksum: {}", e);
         TC_ACT_SHOT
     })?;
+    #[cfg(not(feature = "l4_checksum"))]
+    skb_store(ctx, UDPH_CSUM_OFF, &0u16, 0)?;
 
     ctx.l3_csum_replace(
         IPH_CSUM_OFF,
         u64::from(old_ip),
         u64::from(new_ip),
-        core::mem::size_of_val(&new_ip) as u64,
+        size_of_val(&new_ip) as u64,
     )
     .map_err(|e| {
         error!(ctx, "Failed to update the IP header checksum: {}", e);
@@ -320,12 +329,12 @@ fn set_eth_addr(ctx: &TcContext, offset: usize, mac: &[u8; 6]) -> BpfResult<()> 
 ///
 /// Will return `TC_ACT_SHOT` if any error occurs.
 #[inline]
-fn skb_store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> BpfResult<()> {
+pub fn skb_store<T>(ctx: &TcContext, offset: usize, v: &T, flags: u64) -> BpfResult<()> {
     let offset = u32::try_from(offset).map_err(|_| {
         error!(ctx, "failed to convert offset to u32");
         TC_ACT_SHOT
     })?;
-    let len: u32 = core::mem::size_of::<T>().try_into().map_err(|_| {
+    let len: u32 = size_of::<T>().try_into().map_err(|_| {
         error!(ctx, "failed to convert size to u32");
         TC_ACT_SHOT
     })?;

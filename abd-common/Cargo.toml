@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = []
 user = ["aya"]
 
 [dependencies]
 aya = { workspace = true, optional = true }
+heapless = { workspace = true }
+postcard = { workspace = true }
 rkyv = { workspace = true, features = ["bytecheck"] }
+serde = { workspace = true, features = ["derive"] }
+serde-json-core = { workspace = true }
 
 [lib]
 path = "src/lib.rs"
