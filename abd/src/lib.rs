@@ -1,6 +1,9 @@
 use std::process::Command;
 
-use abd_common::{NodeInfo, ABD_IFACE_NODE_PREFIX, ABD_IFACE_WRITER, ABD_WRITER_ID};
+use abd_common::{
+    constants::{ABD_IFACE_NODE_PREFIX, ABD_IFACE_WRITER, ABD_WRITER_ID},
+    maps::NodeInfo,
+};
 use anyhow::Result;
 use aya::maps::{Array, Map};
 use network_interface::NetworkInterface;

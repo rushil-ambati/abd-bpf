@@ -1,6 +1,6 @@
-use core::mem::offset_of;
+use core::{mem::offset_of, ptr::copy_nonoverlapping};
 
-use abd_common::{ArchivedAbdMsg, ABD_MAGIC};
+use abd_common::{constants::ABD_MAGIC, msg::ArchivedAbdMessage};
 use aya_ebpf::{
     bindings::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
@@ -11,7 +11,7 @@ use aya_ebpf::{
     programs::{TcContext, XdpContext},
     EbpfContext,
 };
-use aya_log_ebpf::error;
+use aya_log_ebpf::{error, info};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
@@ -95,7 +95,7 @@ pub struct AbdPacket<'a> {
     pub eth: &'a mut EthHdr,
     pub iph: &'a mut Ipv4Hdr,
     pub udph: &'a mut UdpHdr,
-    pub msg: Seal<'a, ArchivedAbdMsg>,
+    pub msg: Seal<'a, ArchivedAbdMessage>,
 }
 
 /// Parse an ABD packet from a context
@@ -127,8 +127,8 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     }
     let udph = unsafe { &mut *udph_ptr };
 
-    // Bounds-check that the payload is exactly ArchivedAbdMsg
-    let msg_len = size_of::<ArchivedAbdMsg>();
+    // Bounds-check that the payload is exactly ArchivedAbdMessage
+    let msg_len = size_of::<ArchivedAbdMessage>();
     let start = ctx.data();
     let end = ctx.data_end();
     if start + UDP_PAYLOAD_OFF + msg_len > end {
@@ -138,7 +138,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
     // Get a &mut [u8] pointing to the message bytes
     let msg_ptr = (start + UDP_PAYLOAD_OFF) as *mut u8;
     let slice = unsafe { core::slice::from_raw_parts_mut(msg_ptr, msg_len) };
-    let msg = unsafe { access_unchecked_mut::<ArchivedAbdMsg>(slice) };
+    let msg = unsafe { access_unchecked_mut::<ArchivedAbdMessage>(slice) };
 
     // Check the magic number
     let magic = msg.magic;
@@ -166,6 +166,8 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
 /// The existing checksum should be passed in as `udp_csum` and it will be updated with the new checksum.
 /// After all modifications, the checksum should be written back to the UDP header by the caller.
 ///
+/// The offset where `field` is located must have at least 4 bytes of space after it.
+///
 /// # Errors
 ///
 /// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
@@ -179,16 +181,7 @@ pub fn recompute_udp_csum_for_abd<C, T>(
 where
     C: PacketBuf,
 {
-    let from_size = u32::try_from(size_of::<T>()).map_err(|_| {
-        error!(
-            ctx,
-            "failed to convert size of {} ({}) to u32",
-            core::any::type_name::<T>(),
-            size_of::<T>()
-        );
-        C::ABORT
-    })?;
-    let to_size = u32::try_from(size_of::<T>()).map_err(|_| {
+    let size = u32::try_from(size_of::<T>()).map_err(|_| {
         error!(
             ctx,
             "failed to convert size of {} ({}) to u32",
@@ -198,12 +191,19 @@ where
         C::ABORT
     })?;
 
+    info!(
+        ctx,
+        "Recomputing UDP checksum for {}: size {}",
+        core::any::type_name::<T>(),
+        size,
+    );
+
     let ret = unsafe {
         bpf_csum_diff(
             &raw const **field as *mut u32,
-            from_size,
+            size,
             &raw const *new_val as *mut u32,
-            to_size,
+            size,
             !u32::from(*udp_csum),
         )
     };
@@ -232,6 +232,23 @@ fn csum_fold_helper(mut csum: u64) -> u16 {
     }
     #[expect(clippy::cast_possible_truncation)]
     return !(csum as u16);
+}
+
+/// Copies the contents of `src` into a sealed destination `Seal<'_, T>`.
+///
+/// # Safety
+///
+/// - The caller must ensure `seal` is valid and properly sized.
+/// - The type `T` must be `Copy` or otherwise safe to memcpy.
+#[inline(always)]
+pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
+    unsafe {
+        copy_nonoverlapping(
+            core::ptr::from_ref(src).cast::<u8>(),
+            core::ptr::from_ref(seal.unseal_unchecked()).cast::<u8>() as *mut u8,
+            size_of::<T>(),
+        );
+    }
 }
 
 /// Reads a global variable `var` from within a BPF program using a volatile load.

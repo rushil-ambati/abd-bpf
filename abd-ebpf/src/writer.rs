@@ -2,7 +2,9 @@
 #![no_main]
 
 use abd_common::{
-    AbdMsgType, ArchivedAbdMsg, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID,
+    constants::{ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID},
+    maps::{ClientInfo, NodeInfo},
+    msg::{AbdMessageType, ArchivedAbdMessage},
 };
 use abd_ebpf::utils::{
     common::{
@@ -76,17 +78,19 @@ fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
     let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
     let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
+    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
         error!(ctx, "Invalid message type {} from {}", msg_type, sender);
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
-        AbdMsgType::Write => handle_client_write(ctx, pkt),
-        AbdMsgType::WriteAck => handle_write_ack(ctx, pkt),
+        AbdMessageType::Write => handle_client_write(ctx, pkt),
+        AbdMessageType::WriteAck => handle_write_ack(ctx, pkt),
         _ => {
             warn!(
                 ctx,
-                "Received unexpected message type: {} from @{}, dropping...", msg_type, sender
+                "Received unexpected message type: {} from @{}, dropping...",
+                msg_type as u32,
+                sender
             );
             Ok(TC_ACT_SHOT)
         }
@@ -113,7 +117,7 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     let new_wc = map_increment(ctx, &WRITE_COUNTER, &0)?;
 
     // set ABD message values in-place
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
@@ -181,7 +185,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
 /// After write commit, send a W-ACK back to original client
 fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
 
     // set ABD message values in-place (clearing internal fields)
     let mut udp_csum = pkt.udph.check;

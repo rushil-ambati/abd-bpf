@@ -1,15 +1,16 @@
 #![no_std]
 #![no_main]
 
-use core::ptr::copy_nonoverlapping;
-
 use abd_common::{
-    AbdMsgType, ArchivedAbdMsg, ArchivedAbdValue, ClientInfo, NodeInfo, ABD_MAX_NODES, ABD_UDP_PORT,
+    constants::{ABD_MAX_NODES, ABD_UDP_PORT},
+    maps::{ClientInfo, NodeInfo},
+    msg::{AbdMessageType, ArchivedAbdMessage},
+    value::ArchivedAbdValue,
 };
 use abd_ebpf::utils::{
     common::{
-        map_get_or_default, map_increment, map_insert, parse_abd_packet, read_global,
-        recompute_udp_csum_for_abd, AbdPacket, BpfResult,
+        map_get_or_default, map_increment, map_insert, overwrite_seal, parse_abd_packet,
+        read_global, recompute_udp_csum_for_abd, AbdPacket, BpfResult,
     },
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
@@ -81,14 +82,14 @@ fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
 
     let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
+    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
         error!(ctx, "Invalid message type {} from {}", msg_type, sender);
         TC_ACT_SHOT
     })?;
     match parsed_msg_type {
-        AbdMsgType::Read => handle_client_read(ctx, pkt),
-        AbdMsgType::ReadAck => handle_read_ack(ctx, pkt),
-        AbdMsgType::WriteAck => handle_write_ack(ctx, pkt),
+        AbdMessageType::Read => handle_client_read(ctx, pkt),
+        AbdMessageType::ReadAck => handle_read_ack(ctx, pkt),
+        AbdMessageType::WriteAck => handle_write_ack(ctx, pkt),
         _ => {
             warn!(
                 ctx,
@@ -124,7 +125,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     let new_rc = map_increment(ctx, &READ_COUNTER, &0)?;
 
     // set ABD message values in-place
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
@@ -144,7 +145,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
 /// Handle a R-ACK from a replica (Phase-1)
 fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
 
     if map_get_or_default(&STATUS, &0) != 1 {
         debug!(
@@ -215,20 +216,14 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut csum)?;
     *sender = my_id.into();
 
-    recompute_udp_csum_for_abd(ctx, &type_, &AbdMsgType::Write.into(), &mut csum)?;
-    *type_ = AbdMsgType::Write.into();
+    recompute_udp_csum_for_abd(ctx, &type_, &AbdMessageType::Write.into(), &mut csum)?;
+    *type_ = AbdMessageType::Write.into();
 
     recompute_udp_csum_for_abd(ctx, &tag, &max_tag.into(), &mut csum)?;
     *tag = max_tag.into();
 
     recompute_udp_csum_for_abd(ctx, &value, max_value, &mut csum)?;
-    unsafe {
-        copy_nonoverlapping(
-            core::ptr::from_ref(max_value).cast(),
-            core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
-            size_of::<ArchivedAbdValue>(),
-        );
-    };
+    overwrite_seal(value, max_value);
 
     recompute_udp_csum_for_abd(ctx, &counter, &new_rc.into(), &mut csum)?;
     *counter = new_rc.into();
@@ -294,7 +289,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 
 /// After propagation (Phase-2), send a R-ACK to original client
 fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    munge!(let ArchivedAbdMsg { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
 
     let max_tag = map_get_or_default(&MAX_TAG, &0);
     let max_value = unsafe { MAX_VALUE.get(&0) }.ok_or_else(|| {
@@ -309,20 +304,14 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
     recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
-    recompute_udp_csum_for_abd(ctx, &type_, &AbdMsgType::ReadAck.into(), &mut udp_csum)?;
-    *type_ = AbdMsgType::ReadAck.into();
+    recompute_udp_csum_for_abd(ctx, &type_, &AbdMessageType::ReadAck.into(), &mut udp_csum)?;
+    *type_ = AbdMessageType::ReadAck.into();
 
     recompute_udp_csum_for_abd(ctx, &tag, &max_tag.into(), &mut udp_csum)?;
     *tag = max_tag.into();
 
     recompute_udp_csum_for_abd(ctx, &value, max_value, &mut udp_csum)?;
-    unsafe {
-        copy_nonoverlapping(
-            core::ptr::from_ref(max_value).cast(),
-            core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
-            size_of::<ArchivedAbdValue>(),
-        );
-    };
+    overwrite_seal(value, max_value);
 
     recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;
     *counter = 0.into();

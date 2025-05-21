@@ -1,6 +1,9 @@
 use core::net::Ipv4Addr;
 
-use abd_common::{ClientInfo, NodeInfo, ABD_SERVER_UDP_PORT, ABD_UDP_PORT};
+use abd_common::{
+    constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
+    maps::{ClientInfo, NodeInfo},
+};
 use aya_ebpf::{
     bindings::{BPF_F_PSEUDO_HDR, TC_ACT_REDIRECT, TC_ACT_SHOT},
     helpers::r#gen::{bpf_redirect, bpf_skb_store_bytes},

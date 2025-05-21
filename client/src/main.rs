@@ -4,7 +4,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use abd_common::{AbdMsg, AbdMsgType, AbdValue, ArchivedAbdMsg, ABD_UDP_PORT};
+use abd_common::{
+    constants::ABD_UDP_PORT,
+    msg::{AbdMessage, AbdMessageType, ArchivedAbdMessage},
+    value::AbdValue,
+};
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
 use rkyv::{deserialize, rancor::Error as RkyvError};
@@ -68,8 +72,8 @@ fn main() -> anyhow::Result<()> {
     debug!("Parsed arguments: {cli:?}");
 
     let expected_ack = match cli.command {
-        Command::Write(_) => AbdMsgType::WriteAck,
-        Command::Read(_) => AbdMsgType::ReadAck,
+        Command::Write(_) => AbdMessageType::WriteAck,
+        Command::Read(_) => AbdMessageType::ReadAck,
     };
 
     let (server_addr, msg, label) = match cli.command {
@@ -79,7 +83,7 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
-            let msg = AbdMsg::new(sender_id, AbdMsgType::Write, tag, opts.value, counter);
+            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.value);
             let mut label = format!("WRITE({:?})", opts.value);
 
             if opts.common.tag.is_some() {
@@ -101,12 +105,12 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or_default();
             let tag = opts.common.tag.unwrap_or_default();
 
-            let msg = AbdMsg::new(
-                sender_id,
-                AbdMsgType::Read,
-                tag,
-                AbdValue::default(),
+            let msg = AbdMessage::new(
                 counter,
+                sender_id,
+                tag,
+                AbdMessageType::Read,
+                AbdValue::default(),
             );
             let mut label = "READ".to_string();
 
@@ -139,9 +143,9 @@ fn main() -> anyhow::Result<()> {
     let elapsed = start.elapsed();
     debug!("Got ({n} bytes) from {from}");
 
-    let archived = rkyv::access::<ArchivedAbdMsg, RkyvError>(&buf[..n])
+    let archived = rkyv::access::<ArchivedAbdMessage, RkyvError>(&buf[..n])
         .map_err(|e| anyhow::anyhow!("deserialise: {e}"))?;
-    let resp: AbdMsg = deserialize::<AbdMsg, RkyvError>(archived)
+    let resp: AbdMessage = deserialize::<AbdMessage, RkyvError>(archived)
         .map_err(|e| anyhow::anyhow!("deserialise (stage 2): {e}"))?;
     debug!("Deserialised response: {resp:?}");
 
@@ -149,17 +153,17 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn report(resp: &AbdMsg, elapsed: Duration, expected: AbdMsgType) {
-    match AbdMsgType::try_from(resp.type_) {
+fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
+    match AbdMessageType::try_from(resp.type_) {
         Ok(received) if received == expected => {
             match received {
-                AbdMsgType::ReadAck => {
+                AbdMessageType::ReadAck => {
                     info!(
                         "R-ACK({:?}) from @{}, took={elapsed:?}",
                         resp.value, resp.sender
                     );
                 }
-                AbdMsgType::WriteAck => {
+                AbdMessageType::WriteAck => {
                     info!("W-ACK from @{}, took={elapsed:?}", resp.sender);
                 }
                 _ => {}

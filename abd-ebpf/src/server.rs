@@ -1,14 +1,17 @@
 #![no_std]
 #![no_main]
 
-use core::{mem::swap, ptr::copy_nonoverlapping};
+use core::mem::swap;
 
 use abd_common::{
-    AbdMsgType, ArchivedAbdMsg, ArchivedAbdValue, NodeInfo, ABD_MAX_NODES, ABD_SERVER_UDP_PORT,
+    constants::{ABD_MAX_NODES, ABD_SERVER_UDP_PORT},
+    maps::NodeInfo,
+    msg::{AbdMessageType, ArchivedAbdMessage},
+    value::ArchivedAbdValue,
 };
 use abd_ebpf::utils::common::{
-    map_get_or_default, map_insert, parse_abd_packet, read_global, recompute_udp_csum_for_abd,
-    AbdPacket, BpfResult,
+    map_get_or_default, map_insert, overwrite_seal, parse_abd_packet, read_global,
+    recompute_udp_csum_for_abd, AbdPacket, BpfResult,
 };
 use aya_ebpf::{
     bindings::xdp_action::{XDP_ABORTED, XDP_DROP, XDP_REDIRECT},
@@ -77,17 +80,19 @@ fn try_server(ctx: &XdpContext) -> BpfResult<u32> {
 
     let sender = pkt.msg.sender.to_native();
     let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMsgType::try_from(msg_type).map_err(|()| {
+    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
         error!(ctx, "Invalid message type {} from @{}", msg_type, sender);
         XDP_ABORTED
     })?;
     match parsed_msg_type {
-        AbdMsgType::Read => handle_read(ctx, pkt),
-        AbdMsgType::Write => handle_write(ctx, pkt),
+        AbdMessageType::Read => handle_read(ctx, pkt),
+        AbdMessageType::Write => handle_write(ctx, pkt),
         _ => {
             warn!(
                 ctx,
-                "Received unexpected message type {} from @{}, dropping...", msg_type, sender
+                "Received unexpected message type {} from @{}, dropping...",
+                msg_type as u32,
+                sender
             );
             Ok(XDP_DROP)
         }
@@ -110,7 +115,7 @@ fn handle_read(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     construct_and_send_ack(
         ctx,
         pkt,
-        AbdMsgType::ReadAck,
+        AbdMessageType::ReadAck,
         Some(tag),
         Some(value),
         lookup_dest(ctx, sender)?,
@@ -130,7 +135,7 @@ fn handle_write(ctx: &XdpContext, pkt: AbdPacket) -> BpfResult<u32> {
     construct_and_send_ack(
         ctx,
         pkt,
-        AbdMsgType::WriteAck,
+        AbdMessageType::WriteAck,
         None,
         None,
         lookup_dest(ctx, sender)?,
@@ -179,12 +184,12 @@ fn store_tag_and_value_if_newer(
 fn construct_and_send_ack(
     ctx: &XdpContext,
     pkt: AbdPacket,
-    new_type: AbdMsgType,
+    new_type: AbdMessageType,
     new_tag: Option<u64>,
     new_value: Option<&ArchivedAbdValue>,
     dest: Dest,
 ) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMsg { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = unsafe { read_global(&NODE_ID) };
@@ -201,13 +206,7 @@ fn construct_and_send_ack(
 
     if let Some(new_value) = new_value {
         recompute_udp_csum_for_abd(ctx, &value, new_value, &mut udp_csum)?;
-        unsafe {
-            copy_nonoverlapping(
-                core::ptr::from_ref(new_value).cast(),
-                core::ptr::from_ref(value.unseal_unchecked()) as *mut u8,
-                size_of::<ArchivedAbdValue>(),
-            );
-        };
+        overwrite_seal(value, new_value);
     }
 
     pkt.udph.check = udp_csum;
