@@ -239,13 +239,13 @@ impl core::fmt::Display for AbdMessageData {
 
         writeln!(f, "AbdMessageData {{")?;
         writeln!(f, "    int:        {},", self.int)?;
-        writeln!(f, "    text:       \"{}\",", text)?;
+        writeln!(f, "    text:       \"{text}\",")?;
         writeln!(f, "    ip:         {},", self.ip)?;
         writeln!(f, "    duration:   {:#?},", self.duration)?;
         writeln!(f, "    point:      ({}, {}),", self.point.0, self.point.1)?;
         writeln!(f, "    char_opt:   {:#?},", self.char_opt)?;
-        writeln!(f, "    person:     {:?},", person)?;
-        writeln!(f, "    hashmap:    {:?},", map)?;
+        writeln!(f, "    person:     {person:?},")?;
+        writeln!(f, "    hashmap:    {map:?},")?;
         write!(f, "}}")
     }
 }

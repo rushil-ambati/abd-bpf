@@ -295,6 +295,11 @@ pub fn read_global<T>(var: &'static T) -> T {
 }
 
 /// Get a mutable reference to a value from an `Array` map at the given `index`.
+///
+/// # Errors
+///
+/// If the index is out of bounds, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[allow(clippy::mut_from_ref)]
 #[expect(clippy::inline_always)]
 #[inline(always)]
 pub fn map_get_mut<'a, C, V>(ctx: &'a C, map: &'a Array<V>, index: u32) -> BpfResult<&'a mut V>
