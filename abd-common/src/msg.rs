@@ -58,6 +58,7 @@ impl AbdMessage {
 /// See <https://github.com/rkyv/rkyv/issues/482#issuecomment-2351618161>
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
+#[repr(C)]
 pub enum AbdMessageType {
     /// Read request message.
     Read = 1,

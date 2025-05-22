@@ -2,7 +2,7 @@ use core::net::Ipv4Addr;
 
 use abd_common::{
     constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
-    maps::{ClientInfo, NodeInfo},
+    map_types::{ClientInfo, NodeInfo},
 };
 use aya_ebpf::{
     bindings::{TC_ACT_REDIRECT, TC_ACT_SHOT},
@@ -13,7 +13,7 @@ use aya_ebpf::{
 use aya_log_ebpf::{debug, error};
 
 use super::common::{
-    map_update, ptr_at, AbdPacket, BpfResult, ETH_DST_OFF, ETH_SRC_OFF, IPH_CSUM_OFF, IPH_DST_OFF,
+    map_update, ptr_at, AbdContext, BpfResult, ETH_DST_OFF, ETH_SRC_OFF, IPH_CSUM_OFF, IPH_DST_OFF,
     IPH_SRC_OFF, UDPH_CSUM_OFF, UDPH_DST_OFF, UDPH_SRC_OFF,
 };
 
@@ -121,7 +121,7 @@ pub fn redirect_to_client(ctx: &TcContext, client: &ClientInfo, me: &NodeInfo) -
 pub fn store_client_info(
     ctx: &TcContext,
     client_map: &Array<ClientInfo>,
-    pkt: &AbdPacket,
+    pkt: &AbdContext,
 ) -> BpfResult<()> {
     let client = ClientInfo::new(
         (unsafe { *ctx.skb.skb }).ingress_ifindex,

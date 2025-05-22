@@ -9,6 +9,6 @@
 extern crate std;
 
 pub mod constants;
-pub mod maps;
+pub mod map_types;
 pub mod msg;
 pub mod value;

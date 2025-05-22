@@ -1,6 +1,6 @@
 use core::{mem::offset_of, ptr::copy_nonoverlapping};
 
-use abd_common::{constants::ABD_MAGIC, msg::ArchivedAbdMessage};
+use abd_common::{constants::ABD_MAGIC, map_types::Locked, msg::ArchivedAbdMessage};
 use aya_ebpf::{
     bindings::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
@@ -17,6 +17,8 @@ use network_types::{
     udp::UdpHdr,
 };
 use rkyv::{access_unchecked_mut, seal::Seal};
+
+use super::spinlock::{spin_lock_release, try_spin_lock_acquire};
 
 pub const ETH_SRC_OFF: usize = offset_of!(EthHdr, src_addr);
 pub const ETH_DST_OFF: usize = offset_of!(EthHdr, dst_addr);
@@ -36,7 +38,7 @@ pub const UDP_PAYLOAD_OFF: usize = UDPH_OFF + UdpHdr::LEN;
 pub type BpfResult<T> = Result<T, i64>;
 
 /// Anything with `data` & `data_end` pointers
-pub trait PacketBuf: EbpfContext {
+pub trait PacketCtx: EbpfContext {
     fn data(&self) -> usize;
     fn data_end(&self) -> usize;
 
@@ -44,7 +46,7 @@ pub trait PacketBuf: EbpfContext {
     const IGNORE: i64;
     const DROP: i64;
 }
-impl PacketBuf for XdpContext {
+impl PacketCtx for XdpContext {
     fn data(&self) -> usize {
         Self::data(self)
     }
@@ -57,7 +59,7 @@ impl PacketBuf for XdpContext {
     const IGNORE: i64 = XDP_PASS as i64;
     const DROP: i64 = XDP_DROP as i64;
 }
-impl PacketBuf for TcContext {
+impl PacketCtx for TcContext {
     fn data(&self) -> usize {
         Self::data(self)
     }
@@ -78,7 +80,7 @@ impl PacketBuf for TcContext {
 /// Returns an error if the offset is out of bounds.
 /// For XDP, returns `XDP_ABORTED` on error. For other program types, returns `TC_ACT_SHOT` on error.
 #[inline]
-pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
+pub fn ptr_at<C: PacketCtx, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
     let start = ctx.data();
     let end = ctx.data_end();
     let len = size_of::<T>();
@@ -90,7 +92,8 @@ pub fn ptr_at<C: PacketBuf, T>(ctx: &C, offset: usize) -> BpfResult<*mut T> {
 }
 
 /// ABD packet headers and message
-pub struct AbdPacket<'a> {
+#[repr(C)]
+pub struct AbdContext<'a> {
     pub eth: &'a mut EthHdr,
     pub iph: &'a mut Ipv4Hdr,
     pub udph: &'a mut UdpHdr,
@@ -103,7 +106,7 @@ pub struct AbdPacket<'a> {
 ///
 /// If the packet is not an ABD packet, returns `XDP_PASS` or `TC_ACT_PIPE` depending on the context.
 /// If any other error occurs during packet parsing, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
-pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> BpfResult<AbdPacket> {
+pub fn parse_abd_packet<C: PacketCtx>(ctx: &C, port: u16, num_nodes: u32) -> BpfResult<AbdContext> {
     // Ethernet → must be IPv4
     let eth_ptr: *mut EthHdr = ptr_at(ctx, 0)?;
     if unsafe { (*eth_ptr).ether_type } != EtherType::Ipv4 {
@@ -152,7 +155,7 @@ pub fn parse_abd_packet<C: PacketBuf>(ctx: &C, port: u16, num_nodes: u32) -> Bpf
         return Err(C::IGNORE);
     }
 
-    Ok(AbdPacket {
+    Ok(AbdContext {
         eth,
         iph,
         udph,
@@ -180,7 +183,7 @@ pub fn recompute_udp_csum_for_abd<C, T>(
     udp_csum: &mut u16,
 ) -> BpfResult<()>
 where
-    C: PacketBuf,
+    C: PacketCtx,
 {
     use aya_ebpf::helpers::r#gen::bpf_csum_diff;
     use aya_log_ebpf::info;
@@ -254,7 +257,7 @@ pub const fn recompute_udp_csum_for_abd<C, T>(
     udp_csum: &mut u16,
 ) -> BpfResult<()>
 where
-    C: PacketBuf,
+    C: PacketCtx,
 {
     *udp_csum = 0;
     Ok(())
@@ -291,6 +294,20 @@ pub fn read_global<T>(var: &'static T) -> T {
     unsafe { core::ptr::read_volatile(&raw const *var) }
 }
 
+/// Get a mutable reference to a value from an `Array` map at the given `index`.
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub fn map_get_mut<'a, C, V>(ctx: &'a C, map: &'a Array<V>, index: u32) -> BpfResult<&'a mut V>
+where
+    C: PacketCtx,
+{
+    let value_ptr = map.get_ptr_mut(index).ok_or_else(|| {
+        error!(ctx, "Failed to get pointer to map");
+        C::ABORT
+    })?;
+    unsafe { Ok(&mut *value_ptr) }
+}
+
 /// Reads a value out of an `Array` map at the given `index`, returning a default value if it is not found.
 #[expect(clippy::inline_always)]
 #[inline(always)]
@@ -310,7 +327,7 @@ where
 #[inline(always)]
 pub fn map_update<C, V>(ctx: &C, map: &Array<V>, index: u32, new_value: &V) -> BpfResult<()>
 where
-    C: PacketBuf,
+    C: PacketCtx,
 {
     let value_ptr_mut = map.get_ptr_mut(index).ok_or_else(|| {
         error!(ctx, "Failed to get pointer to map");
@@ -318,11 +335,35 @@ where
     })?;
     unsafe {
         copy_nonoverlapping(
-            new_value as *const V as *const u8,
+            core::ptr::from_ref::<V>(new_value).cast::<u8>(),
             value_ptr_mut.cast::<u8>(),
             size_of::<V>(),
         );
     }
+    Ok(())
+}
+
+/// Inserts a `Locked` value into an `Array` map at the given `key`
+///
+/// # Errors
+///
+/// If the insertion fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub fn map_update_locked<C, T>(
+    ctx: &C,
+    arr: &Array<Locked<T>>,
+    key: u32,
+    new_value: &T,
+) -> BpfResult<()>
+where
+    C: PacketCtx,
+    T: Copy,
+{
+    let entry = map_get_mut(ctx, arr, key)?;
+    try_spin_lock_acquire(ctx, &mut entry.lock).map_err(|_| TC_ACT_SHOT)?;
+    entry.value = *new_value;
+    spin_lock_release(&mut entry.lock);
     Ok(())
 }
 
@@ -334,7 +375,7 @@ where
 #[inline]
 pub fn map_increment<C, V>(ctx: &C, map: &Array<V>, index: u32) -> BpfResult<V>
 where
-    C: PacketBuf,
+    C: PacketCtx,
     V: Copy + core::ops::Add<Output = V> + From<u8> + Default,
 {
     let value_ptr_mut = map.get_ptr_mut(index).ok_or_else(|| {
@@ -344,10 +385,30 @@ where
     let incremented_value = unsafe { *value_ptr_mut } + V::from(1);
     unsafe {
         copy_nonoverlapping(
-            &incremented_value as *const V as *const u8,
+            (&raw const incremented_value).cast::<u8>(),
             value_ptr_mut.cast::<u8>(),
             size_of::<V>(),
         );
     }
+    Ok(incremented_value)
+}
+
+/// Increments a `Locked<T>` value in an `Array` map at the given `key`, returning the new value.
+///
+/// # Errors
+///
+/// If the increment fails, returns `XDP_ABORTED` or `TC_ACT_SHOT` depending on the context.
+#[expect(clippy::inline_always)]
+#[inline(always)]
+pub fn map_increment_locked<C, T>(ctx: &C, arr: &Array<Locked<T>>, key: u32) -> BpfResult<T>
+where
+    C: PacketCtx,
+    T: Copy + core::ops::Add<Output = T> + From<u8> + Default,
+{
+    let entry = map_get_mut(ctx, arr, key)?;
+    try_spin_lock_acquire(ctx, &mut entry.lock).map_err(|_| TC_ACT_SHOT)?;
+    let incremented_value = entry.value + T::from(1);
+    entry.value = incremented_value;
+    spin_lock_release(&mut entry.lock);
     Ok(incremented_value)
 }

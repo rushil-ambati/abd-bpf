@@ -146,7 +146,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("{label} -> {}", server_addr);
+    info!("{label} -> {server_addr}");
 
     let start = Instant::now();
     sock.send_to(&payload, server_addr)?;

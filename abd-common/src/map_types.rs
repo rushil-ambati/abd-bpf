@@ -1,11 +1,43 @@
 use core::net::Ipv4Addr;
 
+use crate::value::ArchivedAbdValue;
+
+pub type SpinLock = u64;
+pub type Tag = Locked<u64>;
+pub type Counter = Locked<u64>;
+pub type Status = Locked<u8>; // Each actor defines its own status values, but zero is always considered "active and idle"
+
+/// A generic tagged entry with a lock and a value of any type.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct Locked<T> {
+    pub lock: SpinLock,
+    pub value: T,
+}
+impl<T: Default> Default for Locked<T> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            lock: 0,
+            value: T::default(),
+        }
+    }
+}
+
+/// A tagged/timestamped value entry to be stored on a replica server.
+/// The object lock is inside the `tag`.
+#[repr(C)]
+pub struct TagValue {
+    pub tag: Tag,
+    pub value: ArchivedAbdValue,
+}
+
 /// Information about a network node participating in the ABD protocol.
 ///
 /// This struct is `#[repr(C)]` for FFI compatibility.
-#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
+#[repr(C)]
 pub struct NodeInfo {
     /// Network interface index.
     pub ifindex: u32,
@@ -38,9 +70,9 @@ unsafe impl aya::Pod for NodeInfo {}
 /// Information about a client in the ABD protocol.
 ///
 /// This struct is `#[repr(C)]` for FFI compatibility.
-#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 #[non_exhaustive]
+#[repr(C)]
 pub struct ClientInfo {
     /// Network interface index.
     pub ifindex: u32,

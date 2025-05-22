@@ -3,13 +3,13 @@
 
 use abd_common::{
     constants::{ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID},
-    maps::{ClientInfo, NodeInfo},
+    map_types::{ClientInfo, Counter, NodeInfo, Status, Tag},
     msg::{AbdMessageType, ArchivedAbdMessage},
 };
 use abd_ebpf::utils::{
     common::{
-        map_get_or_default, map_increment, map_update, parse_abd_packet, read_global,
-        recompute_udp_csum_for_abd, AbdPacket, BpfResult,
+        map_increment_locked, map_update, map_update_locked, parse_abd_packet, read_global,
+        recompute_udp_csum_for_abd, AbdContext, BpfResult,
     },
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
@@ -30,7 +30,7 @@ static NUM_NODES: u32 = 0;
 #[no_mangle]
 static NODE_ID: u32 = 0;
 
-/// Node information - populated from userspace
+/// Node information - populated from userspace (read-only)
 #[map]
 static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDONLY_PROG);
 
@@ -38,21 +38,21 @@ static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDO
 #[map]
 static CLIENT_INFO: Array<ClientInfo> = Array::with_max_entries(1, 0);
 
-/// Flag: 0 = idle, 1 = write in progress
+/// Status byte: 0 = idle, 1 = writing
 #[map]
-static ACTIVE: Array<bool> = Array::with_max_entries(1, 0);
+static STATUS: Array<Status> = Array::with_max_entries(1, 0);
 
 /// monotonically-increasing tag
 #[map]
-static TAG: Array<u64> = Array::with_max_entries(1, 0);
+static TAG: Array<Tag> = Array::with_max_entries(1, 0);
 
 /// monotonically-increasing
 #[map]
-static WRITE_COUNTER: Array<u64> = Array::with_max_entries(1, 0);
+static WRITE_COUNTER: Array<Counter> = Array::with_max_entries(1, 0);
 
 /// acknowledgment count for current operation
 #[map]
-static ACK_COUNT: Array<u64> = Array::with_max_entries(1, 0);
+static ACK_COUNT: Array<Counter> = Array::with_max_entries(1, 0);
 
 #[allow(clippy::needless_pass_by_value)]
 #[classifier]
@@ -98,25 +98,30 @@ fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
 }
 
 /// Handle WRITE request from a client
-fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    if map_get_or_default(&ACTIVE, 0) {
-        warn!(ctx, "Busy – drop WRITE");
+fn handle_client_write(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
+    // quick rejection that doesn't require locks
+    if STATUS.get(0).map(|s| s.value).unwrap_or(0) != 0 {
+        debug!(ctx, "Busy – drop WRITE");
         return Ok(TC_ACT_SHOT);
     }
 
     info!(ctx, "WRITE from client");
 
-    map_update(ctx, &ACTIVE, 0, &true)?;
-    map_update(ctx, &ACK_COUNT, 0, &0)?;
+    // set status to writing
+    map_update_locked(ctx, &STATUS, 0, &1)?;
 
+    // clear ACK count - note this doesn't need a lock as status is already set
+    map_update(ctx, &ACK_COUNT, 0, &Counter::default())?;
+
+    // remember the client
     store_client_info(ctx, &CLIENT_INFO, &pkt)
         .inspect_err(|_| error!(ctx, "Failed to store client info"))?;
 
     // increment tag & write counter
-    let new_tag = map_increment(ctx, &TAG, 0)?;
-    let new_wc = map_increment(ctx, &WRITE_COUNTER, 0)?;
+    let new_tag = map_increment_locked(ctx, &TAG, 0)?;
+    let new_wc = map_increment_locked(ctx, &WRITE_COUNTER, 0)?;
 
-    // set ABD message values in-place
+    // patch message in-place
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
@@ -139,52 +144,51 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
 }
 
 /// Handle W-ACK from replica
-fn handle_write_ack(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
-    let sender = pkt.msg.sender.to_native();
-
-    if !map_get_or_default(&ACTIVE, 0) {
-        debug!(ctx, "No write in progress – drop W-ACK from @{}", sender);
+fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
+    // quick rejection that doesn't require locks
+    if STATUS.get(0).map(|s| s.value).unwrap_or(0) == 0 {
+        debug!(ctx, "No write in progress – drop W-ACK");
         return Ok(TC_ACT_SHOT);
     }
 
     // ensure the ACK is for the current operation
-    let counter = pkt.msg.counter.to_native();
-    let wc = map_get_or_default(&WRITE_COUNTER, 0);
-    if counter != wc {
+    let wc_current = WRITE_COUNTER.get(0).map(|c| c.value).unwrap_or(0);
+    if pkt.msg.counter.to_native() != wc_current {
         warn!(
             ctx,
-            "W-ACK counter mismatch (expected {}, got {})", wc, counter
+            "W-ACK counter mismatch (expected {}, got {})",
+            wc_current,
+            pkt.msg.counter.to_native()
         );
         return Ok(TC_ACT_SHOT);
     }
 
-    debug!(ctx, "Received W-ACK from @{}", sender);
+    debug!(ctx, "Received W-ACK from @{}", pkt.msg.sender.to_native());
 
     // bump ack counter
-    let acks = map_increment(ctx, &ACK_COUNT, 0)?;
+    let new_acks = map_increment_locked(ctx, &ACK_COUNT, 0)?;
 
     // check if we have enough ACKs
     let majority = u64::from(((read_global(&NUM_NODES)) >> 1) + 1);
-    if acks < majority {
-        info!(
+    if new_acks < majority {
+        debug!(
             ctx,
-            "Got {} W-ACK(s), waiting for majority ({})...", acks, majority
+            "Got {} W-ACK(s), waiting for majority ({})...", new_acks, majority
         );
         return Ok(TC_ACT_SHOT);
     }
 
     info!(ctx, "WRITE committed, majority ({}) reached", majority);
 
-    // clean up
-    map_update(ctx, &ACTIVE, 0, &false)?;
-    map_update(ctx, &ACK_COUNT, 0, &0)?;
+    // reset status back to idle
+    map_update_locked(ctx, &STATUS, 0, &0)?;
 
     send_write_ack_to_client(ctx, pkt)
         .inspect_err(|_| error!(ctx, "Failed to redirect W-ACK to client"))
 }
 
 /// After write commit, send a W-ACK back to original client
-fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdPacket) -> BpfResult<i32> {
+fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
 
     // set ABD message values in-place (clearing internal fields)
