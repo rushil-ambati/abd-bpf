@@ -150,7 +150,7 @@ writer_ip=$(
 
 declare -a values=(
   "int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27) hashmap={author:Bob;version:1.0;license:MIT}"
-  "int=88 text=world ip=2001:0db8:85a3:0000:0000:8a2e:0370:7334 duration=1 point=(-0.3,4.1) person=(Alice,30) hashmap={author:Alice;version:2.0;license:GPL}"
+  "int=88 text=world ip=2001:0db8:85a3:0000:0000:8a2e:0370:7334 duration=3600 point=(-0.3,4.1) person=(Alice,30) hashmap={author:Alice;version:2.0;license:GPL}"
 )
 for val in "${values[@]}"; do
   # Write
@@ -161,14 +161,14 @@ for val in "${values[@]}"; do
   # Read from each node
   for i in $(seq 1 "$NUM_NODES"); do
     env="node$i"
-    reader_ip=$(
+    node_ip=$(
       "${TESTENV[@]}" -n "$env" status |
         awk '/Iface:/ {print $4}' |
         cut -d'/' -f1
     )
 
     run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
-      RUST_LOG=info $TARGET_DIR/client read $reader_ip"
+      RUST_LOG=info $TARGET_DIR/client read $node_ip"
     echo
   done
 done

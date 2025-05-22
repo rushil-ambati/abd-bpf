@@ -6,8 +6,7 @@ use std::{
 
 use abd_common::{
     constants::ABD_UDP_PORT,
-    msg::{AbdMessage, AbdMessageType, ArchivedAbdMessage},
-    value::AbdValue,
+    message::{AbdMessage, AbdMessageData, AbdMessageType, ArchivedAbdMessage},
 };
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
@@ -47,6 +46,10 @@ struct CommonOpts {
     /// Tag value
     #[arg(short = 't', long)]
     tag: Option<u64>,
+
+    /// Use internal server port instead of node port
+    #[arg(long)]
+    server_mode: bool,
 }
 
 #[derive(Args, Debug)]
@@ -55,8 +58,8 @@ struct WriteOpts {
     common: CommonOpts,
 
     /// Value to write (required positional argument)
-    #[arg(value_parser = clap::value_parser!(AbdValue))]
-    value: AbdValue,
+    #[arg(value_parser = clap::value_parser!(AbdMessageData))]
+    data: AbdMessageData,
 }
 
 #[derive(Args, Debug)]
@@ -83,8 +86,8 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
-            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.value);
-            let mut label = format!("WRITE({})", opts.value);
+            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.data);
+            let mut label = format!("WRITE({})", opts.data);
 
             if opts.common.tag.is_some() {
                 let _ = write!(label, " tag={tag}");
@@ -96,7 +99,12 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            let port = if opts.common.server_mode {
+                abd_common::constants::ABD_SERVER_UDP_PORT
+            } else {
+                ABD_UDP_PORT
+            };
+            (SocketAddrV4::new(server, port), msg, label)
         }
 
         Command::Read(opts) => {
@@ -110,7 +118,7 @@ fn main() -> anyhow::Result<()> {
                 sender_id,
                 tag,
                 AbdMessageType::Read,
-                AbdValue::default(),
+                AbdMessageData::default(),
             );
             let mut label = "READ".to_string();
 
@@ -124,7 +132,12 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            let port = if opts.common.server_mode {
+                abd_common::constants::ABD_SERVER_UDP_PORT
+            } else {
+                ABD_UDP_PORT
+            };
+            (SocketAddrV4::new(server, port), msg, label)
         }
     };
 
@@ -132,7 +145,7 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("{label} -> {}", server_addr.ip());
+    info!("{label} -> {server_addr}");
 
     let start = Instant::now();
     sock.send_to(&payload, server_addr)?;
@@ -160,7 +173,7 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
                 AbdMessageType::ReadAck => {
                     info!(
                         "R-ACK({}) from @{}, took={elapsed:?}",
-                        resp.value, resp.sender
+                        resp.data, resp.sender
                     );
                 }
                 AbdMessageType::WriteAck => {
@@ -170,7 +183,7 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
             }
             debug!(
                 "sender={} tag={} value={:?} counter={}",
-                resp.sender, resp.tag, resp.value, resp.counter
+                resp.sender, resp.tag, resp.data, resp.counter
             );
         }
         Ok(unexpected) => {

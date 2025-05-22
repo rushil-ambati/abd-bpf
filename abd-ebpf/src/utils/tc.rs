@@ -2,18 +2,18 @@ use core::net::Ipv4Addr;
 
 use abd_common::{
     constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
-    maps::{ClientInfo, NodeInfo},
+    map_types::{ClientInfo, NodeInfo},
 };
 use aya_ebpf::{
     bindings::{TC_ACT_REDIRECT, TC_ACT_SHOT},
     helpers::r#gen::{bpf_redirect, bpf_skb_store_bytes},
-    maps::{Array, HashMap},
+    maps::Array,
     programs::TcContext,
 };
 use aya_log_ebpf::{debug, error};
 
 use super::common::{
-    map_insert, ptr_at, AbdPacket, BpfResult, ETH_DST_OFF, ETH_SRC_OFF, IPH_CSUM_OFF, IPH_DST_OFF,
+    map_update, ptr_at, AbdContext, BpfResult, ETH_DST_OFF, ETH_SRC_OFF, IPH_CSUM_OFF, IPH_DST_OFF,
     IPH_SRC_OFF, UDPH_CSUM_OFF, UDPH_DST_OFF, UDPH_SRC_OFF,
 };
 
@@ -120,8 +120,8 @@ pub fn redirect_to_client(ctx: &TcContext, client: &ClientInfo, me: &NodeInfo) -
 #[inline]
 pub fn store_client_info(
     ctx: &TcContext,
-    client_map: &HashMap<u32, ClientInfo>,
-    pkt: &AbdPacket,
+    client_map: &Array<ClientInfo>,
+    pkt: &AbdContext,
 ) -> BpfResult<()> {
     let client = ClientInfo::new(
         (unsafe { *ctx.skb.skb }).ingress_ifindex,
@@ -129,7 +129,7 @@ pub fn store_client_info(
         pkt.eth.src_addr,
         u16::from_be(pkt.udph.source),
     );
-    map_insert(ctx, client_map, &0, &client)
+    map_update(ctx, client_map, 0, &client)
 }
 
 /// Set the UDP source port in the packet header.

@@ -2,7 +2,7 @@ use std::process::Command;
 
 use abd_common::{
     constants::{ABD_IFACE_NODE_PREFIX, ABD_IFACE_WRITER, ABD_WRITER_ID},
-    maps::NodeInfo,
+    map_types::NodeInfo,
 };
 use anyhow::Result;
 use aya::maps::{Array, Map};
