@@ -4,8 +4,7 @@
 use abd_common::{
     constants::{ABD_MAX_NODES, ABD_UDP_PORT},
     map_types::{ClientInfo, Counter, NodeInfo, Status, TagValue},
-    msg::{AbdMessageType, ArchivedAbdMessage},
-    value::ArchivedAbdValue,
+    message::{AbdMessageType, ArchivedAbdMessage, ArchivedAbdMessageData},
 };
 use abd_ebpf::utils::{
     common::{
@@ -44,9 +43,9 @@ static CLIENT_INFO: Array<ClientInfo> = Array::with_max_entries(1, 0);
 #[map]
 static STATUS: Array<Status> = Array::with_max_entries(1, 0);
 
-/// Phase-1 aggregation (largest tag & its value)
+/// Phase-1 aggregation (largest tag & its data)
 #[map]
-static MAX_TAG_VALUE: Array<TagValue> = Array::with_max_entries(1, 0);
+static MAX_TAG_DATA: Array<TagValue> = Array::with_max_entries(1, 0);
 
 /// Monotonically-increasing
 #[map]
@@ -105,7 +104,7 @@ fn try_reader(ctx: &TcContext) -> BpfResult<i32> {
 /// Handle READ request from a client (Phase-1)
 fn handle_client_read(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     // quick rejection that doesn't require locks
-    if STATUS.get(0).map(|s| s.value).unwrap_or(0) != 0 {
+    if STATUS.get(0).map(|s| s.val).unwrap_or(0) != 0 {
         debug!(ctx, "Busy – drop READ");
         return Ok(TC_ACT_SHOT);
     }
@@ -119,9 +118,9 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     map_update(ctx, &ACK_COUNT, 0, &Counter::default())?;
     {
         // initialise MAX_TAG_VALUE (under its tag's lock)
-        let max = map_get_mut(ctx, &MAX_TAG_VALUE, 0)?;
+        let max = map_get_mut(ctx, &MAX_TAG_DATA, 0)?;
         try_spin_lock_acquire(ctx, &mut max.tag.lock)?;
-        max.tag.value = 0;
+        max.tag.val = 0;
         spin_lock_release(&mut max.tag.lock);
     }
 
@@ -154,7 +153,7 @@ fn handle_client_read(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
 /// Handle a R-ACK from a replica (Phase-1)
 fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     // quick phase check
-    if STATUS.get(0).map(|s| s.value).unwrap_or(0) != 1 {
+    if STATUS.get(0).map(|s| s.val).unwrap_or(0) != 1 {
         debug!(
             ctx,
             "Dropping R-ACK from @{} - not in Phase-1",
@@ -164,7 +163,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     }
 
     // ensure counter matches this round
-    let rc_now = READ_COUNTER.get(0).map(|c| c.value).unwrap_or(0);
+    let rc_now = READ_COUNTER.get(0).map(|c| c.val).unwrap_or(0);
     if pkt.msg.counter.to_native() != rc_now {
         warn!(
             ctx,
@@ -182,17 +181,17 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
         pkt.msg.tag.to_native()
     );
 
-    // maybe update max tag & value
+    // maybe update max tag & data
     {
-        let max = map_get_mut(ctx, &MAX_TAG_VALUE, 0)?;
+        let max = map_get_mut(ctx, &MAX_TAG_DATA, 0)?;
         try_spin_lock_acquire(ctx, &mut max.tag.lock)?;
-        if pkt.msg.tag.to_native() > max.tag.value {
-            max.tag.value = pkt.msg.tag.to_native();
+        if pkt.msg.tag.to_native() > max.tag.val {
+            max.tag.val = pkt.msg.tag.to_native();
             unsafe {
                 core::ptr::copy_nonoverlapping(
-                    core::ptr::from_ref::<ArchivedAbdValue>(&pkt.msg.value).cast::<u8>(),
-                    &raw const max.value as *mut u8,
-                    size_of::<ArchivedAbdValue>(),
+                    core::ptr::from_ref::<ArchivedAbdMessageData>(&pkt.msg.data).cast::<u8>(),
+                    &raw const max.data as *mut u8,
+                    size_of::<ArchivedAbdMessageData>(),
                 );
             }
         }
@@ -218,13 +217,13 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     map_update_locked(ctx, &ACK_COUNT, 0, &0)?;
 
     // craft the WRITE message
-    let max = MAX_TAG_VALUE.get(0).ok_or_else(|| {
-        error!(ctx, "Failed to get max tag value");
+    let max = MAX_TAG_DATA.get(0).ok_or_else(|| {
+        error!(ctx, "Failed to get max tag and data");
         TC_ACT_SHOT
     })?;
 
     // craft Phase-2 WRITE packet
-    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, data, .. } = pkt.msg);
     let mut csum = pkt.udph.check;
 
     let my_id = read_global(&NODE_ID);
@@ -234,12 +233,12 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     recompute_udp_csum_for_abd(ctx, &type_, &AbdMessageType::Write.into(), &mut csum)?;
     *type_ = AbdMessageType::Write.into();
 
-    let max_tag = max.tag.value;
+    let max_tag = max.tag.val;
     recompute_udp_csum_for_abd(ctx, &tag, &max_tag.into(), &mut csum)?;
     *tag = max_tag.into();
 
-    recompute_udp_csum_for_abd(ctx, &value, &max.value, &mut csum)?;
-    overwrite_seal(value, &max.value);
+    recompute_udp_csum_for_abd(ctx, &data, &max.data, &mut csum)?;
+    overwrite_seal(data, &max.data);
 
     recompute_udp_csum_for_abd(ctx, &counter, &new_rc.into(), &mut csum)?;
     *counter = new_rc.into();
@@ -257,7 +256,7 @@ fn handle_read_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
 /// Handle a W-ACK from a replica (Phase-2)
 fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     // quick phase check
-    if STATUS.get(0).map(|s| s.value).unwrap_or(0) != 2 {
+    if STATUS.get(0).map(|s| s.val).unwrap_or(0) != 2 {
         debug!(
             ctx,
             "Dropping W-ACK from @{} - not in Phase-2",
@@ -267,7 +266,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     }
 
     let counter = pkt.msg.counter.to_native();
-    let rc_now = READ_COUNTER.get(0).map(|c| c.value).unwrap_or(0);
+    let rc_now = READ_COUNTER.get(0).map(|c| c.val).unwrap_or(0);
     if counter != rc_now {
         warn!(
             ctx,
@@ -305,12 +304,12 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
 
 /// After propagation (Phase-2), send a R-ACK to original client
 fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
-    let max = MAX_TAG_VALUE.get(0).ok_or_else(|| {
-        error!(ctx, "Failed to get max tag value");
+    let max = MAX_TAG_DATA.get(0).ok_or_else(|| {
+        error!(ctx, "Failed to get max tag and data");
         TC_ACT_SHOT
     })?;
 
-    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, mut type_, data, .. } = pkt.msg);
 
     // set ABD message values in-place
     let mut udp_csum = pkt.udph.check;
@@ -322,11 +321,11 @@ fn send_read_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     recompute_udp_csum_for_abd(ctx, &type_, &AbdMessageType::ReadAck.into(), &mut udp_csum)?;
     *type_ = AbdMessageType::ReadAck.into();
 
-    recompute_udp_csum_for_abd(ctx, &tag, &max.tag.value.into(), &mut udp_csum)?;
-    *tag = max.tag.value.into();
+    recompute_udp_csum_for_abd(ctx, &tag, &max.tag.val.into(), &mut udp_csum)?;
+    *tag = max.tag.val.into();
 
-    recompute_udp_csum_for_abd(ctx, &value, &max.value, &mut udp_csum)?;
-    overwrite_seal(value, &max.value);
+    recompute_udp_csum_for_abd(ctx, &data, &max.data, &mut udp_csum)?;
+    overwrite_seal(data, &max.data);
 
     recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;
     *counter = 0.into();

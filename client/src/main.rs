@@ -6,8 +6,7 @@ use std::{
 
 use abd_common::{
     constants::ABD_UDP_PORT,
-    msg::{AbdMessage, AbdMessageType, ArchivedAbdMessage},
-    value::AbdValue,
+    message::{AbdMessage, AbdMessageData, AbdMessageType, ArchivedAbdMessage},
 };
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
@@ -59,8 +58,8 @@ struct WriteOpts {
     common: CommonOpts,
 
     /// Value to write (required positional argument)
-    #[arg(value_parser = clap::value_parser!(AbdValue))]
-    value: AbdValue,
+    #[arg(value_parser = clap::value_parser!(AbdMessageData))]
+    data: AbdMessageData,
 }
 
 #[derive(Args, Debug)]
@@ -87,8 +86,8 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
-            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.value);
-            let mut label = format!("WRITE({})", opts.value);
+            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.data);
+            let mut label = format!("WRITE({})", opts.data);
 
             if opts.common.tag.is_some() {
                 let _ = write!(label, " tag={tag}");
@@ -119,7 +118,7 @@ fn main() -> anyhow::Result<()> {
                 sender_id,
                 tag,
                 AbdMessageType::Read,
-                AbdValue::default(),
+                AbdMessageData::default(),
             );
             let mut label = "READ".to_string();
 
@@ -174,7 +173,7 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
                 AbdMessageType::ReadAck => {
                     info!(
                         "R-ACK({}) from @{}, took={elapsed:?}",
-                        resp.value, resp.sender
+                        resp.data, resp.sender
                     );
                 }
                 AbdMessageType::WriteAck => {
@@ -184,7 +183,7 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
             }
             debug!(
                 "sender={} tag={} value={:?} counter={}",
-                resp.sender, resp.tag, resp.value, resp.counter
+                resp.sender, resp.tag, resp.data, resp.counter
             );
         }
         Ok(unexpected) => {

@@ -1,6 +1,6 @@
 use core::{mem::offset_of, ptr::copy_nonoverlapping};
 
-use abd_common::{constants::ABD_MAGIC, map_types::Locked, msg::ArchivedAbdMessage};
+use abd_common::{constants::ABD_MAGIC, map_types::Locked, message::ArchivedAbdMessage};
 use aya_ebpf::{
     bindings::{
         xdp_action::{XDP_ABORTED, XDP_DROP, XDP_PASS},
@@ -271,10 +271,10 @@ where
 /// - The type `T` must be `Copy` or otherwise safe to memcpy.
 #[allow(clippy::inline_always)]
 #[inline(always)]
-pub fn overwrite_seal<T>(seal: Seal<'_, T>, value: &T) {
+pub fn overwrite_seal<T>(seal: Seal<'_, T>, src: &T) {
     unsafe {
         copy_nonoverlapping(
-            core::ptr::from_ref(value).cast::<u8>(),
+            core::ptr::from_ref(src).cast::<u8>(),
             core::ptr::from_ref(seal.unseal_unchecked())
                 .cast::<u8>()
                 .cast_mut(),
@@ -362,7 +362,7 @@ where
 {
     let entry = map_get_mut(ctx, arr, key)?;
     try_spin_lock_acquire(ctx, &mut entry.lock).map_err(|_| TC_ACT_SHOT)?;
-    entry.value = *new_value;
+    entry.val = *new_value;
     spin_lock_release(&mut entry.lock);
     Ok(())
 }
@@ -407,8 +407,8 @@ where
 {
     let entry = map_get_mut(ctx, arr, key)?;
     try_spin_lock_acquire(ctx, &mut entry.lock).map_err(|_| TC_ACT_SHOT)?;
-    let incremented_value = entry.value + T::from(1);
-    entry.value = incremented_value;
+    let incremented_value = entry.val + T::from(1);
+    entry.val = incremented_value;
     spin_lock_release(&mut entry.lock);
     Ok(incremented_value)
 }

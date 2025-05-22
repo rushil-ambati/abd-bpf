@@ -6,8 +6,7 @@ use core::mem;
 use abd_common::{
     constants::{ABD_MAX_NODES, ABD_SERVER_UDP_PORT},
     map_types::{Counter, NodeInfo, TagValue},
-    msg::{AbdMessageType, ArchivedAbdMessage},
-    value::ArchivedAbdValue,
+    message::{AbdMessageType, ArchivedAbdMessage, ArchivedAbdMessageData},
 };
 use abd_ebpf::utils::{
     common::{
@@ -42,9 +41,9 @@ static NODE_ID: u32 = 0;
 #[map]
 static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDONLY_PROG);
 
-/// Current stored tag (timestamp) and value
+/// Current stored tag (timestamp) and associated data
 #[map]
-static TAG_VALUE: Array<TagValue> = Array::with_max_entries(1, 0);
+static TAG_DATA: Array<TagValue> = Array::with_max_entries(1, 0);
 
 /// Per-node request counters
 #[map]
@@ -109,8 +108,8 @@ fn handle_read(ctx: &XdpContext, pkt: AbdContext) -> BpfResult<u32> {
 
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
-    let entry = TAG_VALUE.get(0).ok_or_else(|| {
-        error!(ctx, "Failed to get tag and value");
+    let entry = TAG_DATA.get(0).ok_or_else(|| {
+        error!(ctx, "Failed to get tag and data");
         XDP_ABORTED
     })?;
 
@@ -118,8 +117,8 @@ fn handle_read(ctx: &XdpContext, pkt: AbdContext) -> BpfResult<u32> {
         ctx,
         pkt,
         AbdMessageType::ReadAck,
-        Some(entry.tag.value),
-        Some(&entry.value),
+        Some(entry.tag.val),
+        Some(&entry.data),
         lookup_dest(ctx, sender)?,
     )
 }
@@ -133,7 +132,7 @@ fn handle_write(ctx: &XdpContext, pkt: AbdContext) -> BpfResult<u32> {
     update_sender_counter_if_newer(ctx, sender, counter)?;
 
     let tag = pkt.msg.tag.to_native();
-    store_tag_and_value_if_newer(ctx, tag, &pkt.msg.value)?;
+    store_tag_and_data_if_newer(ctx, tag, &pkt.msg.data)?;
 
     construct_and_send_ack(
         ctx,
@@ -160,13 +159,13 @@ fn update_sender_counter_if_newer(
         XDP_ABORTED
     })?;
 
-    let res = if incoming_counter > counter.value {
-        counter.value = incoming_counter;
+    let res = if incoming_counter > counter.val {
+        counter.val = incoming_counter;
         Ok(())
     } else {
         warn!(
             ctx,
-            "Stale counter for @{} ({} <= {})", sender, incoming_counter, counter.value
+            "Stale counter for @{} ({} <= {})", sender, incoming_counter, counter.val
         );
         Err(XDP_DROP.into())
     };
@@ -176,34 +175,34 @@ fn update_sender_counter_if_newer(
     res
 }
 
-/// Stores new tag and value if tag is newer
+/// Stores new tag and data if tag is newer
 #[allow(clippy::inline_always)]
 #[inline(always)]
-fn store_tag_and_value_if_newer(
+fn store_tag_and_data_if_newer(
     ctx: &XdpContext,
     new_tag: u64,
-    new_value: &ArchivedAbdValue,
+    new_data: &ArchivedAbdMessageData,
 ) -> BpfResult<()> {
-    let stored = map_get_mut(ctx, &TAG_VALUE, 0)?;
+    let stored = map_get_mut(ctx, &TAG_DATA, 0)?;
 
     try_spin_lock_acquire(ctx, &mut stored.tag.lock).map_err(|_| {
-        error!(ctx, "Failed to acquire lock for tag and value");
+        error!(ctx, "Failed to acquire lock for tag and data");
         XDP_ABORTED
     })?;
 
-    if new_tag > stored.tag.value {
-        stored.tag.value = new_tag;
+    if new_tag > stored.tag.val {
+        stored.tag.val = new_tag;
         unsafe {
             core::ptr::copy_nonoverlapping(
-                core::ptr::from_ref::<ArchivedAbdValue>(new_value).cast::<u8>(),
-                &raw const stored.value as *mut u8,
-                size_of::<ArchivedAbdValue>(),
+                core::ptr::from_ref::<ArchivedAbdMessageData>(new_data).cast::<u8>(),
+                &raw const stored.data as *mut u8,
+                size_of::<ArchivedAbdMessageData>(),
             );
         }
     } else {
         debug!(
             ctx,
-            "Tag {} not newer than current {}, skipping update", new_tag, stored.tag.value
+            "Tag {} not newer than current {}, skipping update", new_tag, stored.tag.val
         );
     }
 
@@ -220,10 +219,10 @@ fn construct_and_send_ack(
     pkt: AbdContext,
     new_type: AbdMessageType,
     new_tag: Option<u64>,
-    new_value: Option<&ArchivedAbdValue>,
+    new_data: Option<&ArchivedAbdMessageData>,
     dest: Dest,
 ) -> BpfResult<u32> {
-    munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, value, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, data, .. } = pkt.msg);
     let mut udp_csum = pkt.udph.check;
 
     let my_id = read_global(&NODE_ID);
@@ -238,9 +237,9 @@ fn construct_and_send_ack(
         *tag = new_tag.into();
     }
 
-    if let Some(new_value) = new_value {
-        recompute_udp_csum_for_abd(ctx, &value, new_value, &mut udp_csum)?;
-        overwrite_seal(value, new_value);
+    if let Some(new_value) = new_data {
+        recompute_udp_csum_for_abd(ctx, &data, new_value, &mut udp_csum)?;
+        overwrite_seal(data, new_value);
     }
 
     pkt.udph.check = udp_csum;

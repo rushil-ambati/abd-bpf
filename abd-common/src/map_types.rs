@@ -1,35 +1,35 @@
 use core::net::Ipv4Addr;
 
-use crate::value::ArchivedAbdValue;
+use crate::message::ArchivedAbdMessageData;
 
 pub type SpinLock = u64;
 pub type Tag = Locked<u64>;
 pub type Counter = Locked<u64>;
-pub type Status = Locked<u8>; // Each actor defines its own status values, but zero is always considered "active and idle"
+pub type Status = Locked<u8>; // Each actor defines its own status codes, but zero is always considered "active and idle"
 
 /// A generic tagged entry with a lock and a value of any type.
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub struct Locked<T> {
     pub lock: SpinLock,
-    pub value: T,
+    pub val: T,
 }
 impl<T: Default> Default for Locked<T> {
     #[inline]
     fn default() -> Self {
         Self {
             lock: 0,
-            value: T::default(),
+            val: T::default(),
         }
     }
 }
 
-/// A tagged/timestamped value entry to be stored on a replica server.
+/// A tagged/timestamped data entry to be stored on a replica server.
 /// The object lock is inside the `tag`.
 #[repr(C)]
 pub struct TagValue {
     pub tag: Tag,
-    pub value: ArchivedAbdValue,
+    pub data: ArchivedAbdMessageData,
 }
 
 /// Information about a network node participating in the ABD protocol.

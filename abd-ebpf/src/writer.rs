@@ -4,7 +4,7 @@
 use abd_common::{
     constants::{ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID},
     map_types::{ClientInfo, Counter, NodeInfo, Status, Tag},
-    msg::{AbdMessageType, ArchivedAbdMessage},
+    message::{AbdMessageType, ArchivedAbdMessage},
 };
 use abd_ebpf::utils::{
     common::{
@@ -100,7 +100,7 @@ fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
 /// Handle WRITE request from a client
 fn handle_client_write(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     // quick rejection that doesn't require locks
-    if STATUS.get(0).map(|s| s.value).unwrap_or(0) != 0 {
+    if STATUS.get(0).map(|s| s.val).unwrap_or(0) != 0 {
         debug!(ctx, "Busy – drop WRITE");
         return Ok(TC_ACT_SHOT);
     }
@@ -146,13 +146,13 @@ fn handle_client_write(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
 /// Handle W-ACK from replica
 fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     // quick rejection that doesn't require locks
-    if STATUS.get(0).map(|s| s.value).unwrap_or(0) == 0 {
+    if STATUS.get(0).map(|s| s.val).unwrap_or(0) == 0 {
         debug!(ctx, "No write in progress – drop W-ACK");
         return Ok(TC_ACT_SHOT);
     }
 
     // ensure the ACK is for the current operation
-    let wc_current = WRITE_COUNTER.get(0).map(|c| c.value).unwrap_or(0);
+    let wc_current = WRITE_COUNTER.get(0).map(|c| c.val).unwrap_or(0);
     if pkt.msg.counter.to_native() != wc_current {
         warn!(
             ctx,
