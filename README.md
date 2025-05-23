@@ -1,11 +1,11 @@
-# abd-bpf
+# abdBPF
 
 An implementation of the Attiya, Bar-Noy, Dolev (ABD) distributed algorithm utilising the [eBPF](https://ebpf.io/) technology with the [Aya](https://aya-rs.dev/) framework to fully offload all logic to kernel space.
 
 ## Project Structure
 
 ```shell
-abd-bpf/
+abdBPF/
 ├── abd/                    # Userspace loaders
 ├── abd-common/             # Common data types, structs, and constants
 ├── abd-ebpf/               # eBPF programs implementing ABD logic
