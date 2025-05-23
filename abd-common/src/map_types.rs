@@ -15,7 +15,7 @@ pub struct Locked<T> {
     pub val: T,
 }
 impl<T: Default> Default for Locked<T> {
-    #[inline]
+    #[inline(always)]
     fn default() -> Self {
         Self {
             lock: 0,
@@ -55,7 +55,6 @@ impl NodeInfo {
     /// * `ipv4` - The IPv4 address of the node.
     /// * `mac` - The MAC address of the node.
     #[must_use]
-    #[inline]
     pub const fn new(ifindex: u32, ipv4: Ipv4Addr, mac: [u8; 6]) -> Self {
         Self { ifindex, ipv4, mac }
     }
@@ -94,7 +93,7 @@ impl ClientInfo {
     /// * `mac` - The MAC address of the client.
     /// * `port` - The UDP port used by the client.
     #[must_use]
-    #[inline]
+    #[inline(always)]
     pub const fn new(ifindex: u32, ipv4: Ipv4Addr, mac: [u8; 6], port: u16) -> Self {
         Self {
             ifindex,

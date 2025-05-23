@@ -30,7 +30,7 @@ for dir in target/release target/debug; do
 done
 
 if [[ "$TEARDOWN" = true ]]; then
-  TESTENV="sudo -n tools/testenv/testenv.sh"
+  TESTENV="sudo -n scripts/testenv/testenv.sh"
 
   # grab all the env names listed after "All existing environments:",
   # but bail out early if we see "No environments exist"

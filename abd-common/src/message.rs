@@ -1,7 +1,4 @@
-use core::{
-    net::{IpAddr, Ipv4Addr},
-    time::Duration,
-};
+use core::{net::IpAddr, time::Duration};
 
 use heapless::{FnvIndexMap, String as HString};
 use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
@@ -39,7 +36,6 @@ impl AbdMessage {
     /// * `data` - The data associated with the operation.
     /// * `counter` - The version or ordering counter.
     #[must_use]
-    #[inline]
     pub fn new(
         counter: u64,
         sender: u32,
@@ -92,14 +88,14 @@ impl AbdMessageType {
 }
 impl From<AbdMessageType> for u32 {
     /// Converts an `AbdMsgType` to its corresponding `u32` representation.
-    #[inline]
+    #[inline(always)]
     fn from(val: AbdMessageType) -> Self {
         val as Self
     }
 }
 impl From<AbdMessageType> for u32_le {
     /// Converts an `AbdMsgType` to its little-endian `u32_le` representation.
-    #[inline]
+    #[inline(always)]
     fn from(val: AbdMessageType) -> Self {
         (val as u32).into()
     }
@@ -111,7 +107,7 @@ impl TryFrom<u32> for AbdMessageType {
     ///
     /// Returns `Ok(AbdMsgType)` if the value matches a known message type,
     /// or `Err(())` otherwise.
-    #[inline]
+    #[inline(always)]
     fn try_from(value: u32) -> Result<Self, Self::Error> {
         Self::from_u32(value).ok_or(())
     }
@@ -130,13 +126,13 @@ pub struct AbdMessageData {
     person: [u8; 128],
     hashmap: [u8; 1024],
 }
+#[cfg(feature = "user")]
 impl Default for AbdMessageData {
-    #[inline]
     fn default() -> Self {
         Self {
             int: 0,
             text: [0; 8],
-            ip: Ipv4Addr::UNSPECIFIED.into(),
+            ip: core::net::Ipv4Addr::UNSPECIFIED.into(),
             duration: Duration::ZERO,
             point: (0.0, 0.0),
             char_opt: None,
@@ -145,7 +141,6 @@ impl Default for AbdMessageData {
         }
     }
 }
-
 #[cfg(feature = "user")]
 impl std::str::FromStr for AbdMessageData {
     type Err = String;
@@ -168,7 +163,11 @@ impl std::str::FromStr for AbdMessageData {
                     v.text[..len].copy_from_slice(&bytes[..len]);
                     v.text[len..].fill(0);
                 }
-                "ip" => v.ip = val.parse().unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+                "ip" => {
+                    v.ip = val
+                        .parse()
+                        .unwrap_or(IpAddr::V4(core::net::Ipv4Addr::UNSPECIFIED));
+                }
                 "duration" => {
                     let secs = val.parse().unwrap_or(0);
                     v.duration = Duration::from_secs(secs);

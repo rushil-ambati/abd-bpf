@@ -13,10 +13,6 @@ rkyv = { workspace = true }
 [build-dependencies]
 which = { workspace = true }
 
-[features]
-default = []     # set this to l4_checksum to enable UDP checksum recalculation
-l4_checksum = []
-
 [[bin]]
 name = "reader"
 path = "src/reader.rs"

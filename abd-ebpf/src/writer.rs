@@ -2,19 +2,20 @@
 #![no_main]
 
 use abd_common::{
-    constants::{ABD_MAX_NODES, ABD_UDP_PORT, ABD_WRITER_ID},
+    constants::{ABD_MAX_NODES, ABD_UDP_PORT},
     map_types::{ClientInfo, Counter, NodeInfo, Status, Tag},
     message::{AbdMessageType, ArchivedAbdMessage},
 };
 use abd_ebpf::utils::{
     common::{
-        map_increment_locked, map_update, map_update_locked, parse_abd_packet, read_global,
-        recompute_udp_csum_for_abd, AbdContext, BpfResult,
+        map_increment_locked, map_update, map_update_locked, read_global,
+        recompute_udp_csum_for_abd_update, try_parse_abd_packet, AbdContext,
     },
+    error::AbdError,
     tc::{broadcast_to_nodes, redirect_to_client, store_client_info},
 };
 use aya_ebpf::{
-    bindings::{BPF_F_RDONLY_PROG, TC_ACT_SHOT, TC_ACT_STOLEN},
+    bindings::{BPF_F_RDONLY_PROG, TC_ACT_PIPE, TC_ACT_SHOT, TC_ACT_STOLEN},
     macros::{classifier, map},
     maps::Array,
     programs::TcContext,
@@ -58,106 +59,90 @@ static ACK_COUNT: Array<Counter> = Array::with_max_entries(1, 0);
 #[classifier]
 pub fn writer(ctx: TcContext) -> i32 {
     match try_writer(&ctx) {
-        Ok(act) => act,
-        Err(act) => i32::try_from(act).unwrap_or(TC_ACT_SHOT),
-    }
-}
-
-fn try_writer(ctx: &TcContext) -> BpfResult<i32> {
-    let num_nodes = read_global(&NUM_NODES);
-    if num_nodes == 0 {
-        error!(ctx, "NUM_NODES is not set");
-        return Err(TC_ACT_SHOT.into());
-    }
-    let my_id = read_global(&NODE_ID);
-    if my_id != ABD_WRITER_ID {
-        error!(ctx, "NODE_ID is not set");
-        return Err(TC_ACT_SHOT.into());
-    }
-
-    let pkt = parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)?;
-    let sender = pkt.msg.sender.to_native();
-    let msg_type = pkt.msg.type_.to_native();
-    let parsed_msg_type = AbdMessageType::try_from(msg_type).map_err(|()| {
-        error!(ctx, "Invalid message type {} from {}", msg_type, sender);
-        TC_ACT_SHOT
-    })?;
-    match parsed_msg_type {
-        AbdMessageType::Write => handle_client_write(ctx, pkt),
-        AbdMessageType::WriteAck => handle_write_ack(ctx, pkt),
-        _ => {
-            warn!(
-                ctx,
-                "Received unexpected message type: {} from @{}, dropping...",
-                msg_type as u32,
-                sender
-            );
-            Ok(TC_ACT_SHOT)
+        Ok(ret) => ret,
+        Err(err) => {
+            error!(&ctx, "{}", err.as_ref());
+            TC_ACT_PIPE
         }
     }
 }
 
+fn try_writer(ctx: &TcContext) -> Result<i32, AbdError> {
+    let num_nodes = read_global(&NUM_NODES);
+    if num_nodes == 0 {
+        return Err(AbdError::GlobalUnset);
+    }
+
+    let Some(pkt) = try_parse_abd_packet(ctx, ABD_UDP_PORT, num_nodes)? else {
+        return Ok(TC_ACT_SHOT);
+    };
+
+    let msg_type = AbdMessageType::try_from(pkt.msg.type_.to_native())
+        .map_err(|()| AbdError::InvalidMessageType)?;
+    match msg_type {
+        AbdMessageType::Write => handle_client_write(ctx, pkt),
+        AbdMessageType::WriteAck => handle_write_ack(ctx, pkt),
+        _ => Err(AbdError::UnexpectedMessageType),
+    }
+}
+
 /// Handle WRITE request from a client
-fn handle_client_write(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
+fn handle_client_write(ctx: &TcContext, pkt: AbdContext) -> Result<i32, AbdError> {
     // quick rejection that doesn't require locks
-    if STATUS.get(0).map(|s| s.val).unwrap_or(0) != 0 {
-        debug!(ctx, "Busy – drop WRITE");
+    if STATUS.get(0).map_or(0, |s| s.val) != 0 {
+        warn!(ctx, "Busy – drop WRITE");
         return Ok(TC_ACT_SHOT);
     }
 
     info!(ctx, "WRITE from client");
 
     // set status to writing
-    map_update_locked(ctx, &STATUS, 0, &1)?;
+    map_update_locked(&STATUS, 0, &1)?;
 
     // clear ACK count - note this doesn't need a lock as status is already set
-    map_update(ctx, &ACK_COUNT, 0, &Counter::default())?;
+    map_update(&ACK_COUNT, 0, &Counter::default())?;
 
     // remember the client
-    store_client_info(ctx, &CLIENT_INFO, &pkt)
-        .inspect_err(|_| error!(ctx, "Failed to store client info"))?;
+    store_client_info(ctx, &CLIENT_INFO, &pkt)?;
 
     // increment tag & write counter
-    let new_tag = map_increment_locked(ctx, &TAG, 0)?;
-    let new_wc = map_increment_locked(ctx, &WRITE_COUNTER, 0)?;
+    let new_tag = map_increment_locked(&TAG, 0)?;
+    let new_wc = map_increment_locked(&WRITE_COUNTER, 0)?;
 
     // patch message in-place
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
-    let mut udp_csum = pkt.udph.check;
+    let mut udp_csum = pkt.udp.check;
 
     let my_id = read_global(&NODE_ID);
-    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
-    recompute_udp_csum_for_abd(ctx, &tag, &new_tag.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&tag, &new_tag.into(), &mut udp_csum)?;
     *tag = new_tag.into();
 
-    recompute_udp_csum_for_abd(ctx, &counter, &new_wc.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&counter, &new_wc.into(), &mut udp_csum)?;
     *counter = new_wc.into();
 
-    pkt.udph.check = udp_csum;
+    pkt.udp.check = udp_csum;
 
     let num_nodes = read_global(&NUM_NODES);
-    broadcast_to_nodes(ctx, my_id, &NODES, num_nodes)
-        .map(|()| TC_ACT_STOLEN)
-        .inspect_err(|_| error!(ctx, "Failed to broadcast WRITE request"))
+    broadcast_to_nodes(ctx, my_id, &NODES, num_nodes).map(|()| TC_ACT_STOLEN)
 }
 
 /// Handle W-ACK from replica
-fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
-    // quick rejection that doesn't require locks
-    if STATUS.get(0).map(|s| s.val).unwrap_or(0) == 0 {
+fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> Result<i32, AbdError> {
+    if STATUS.get(0).map_or(0, |s| s.val) == 0 {
         debug!(ctx, "No write in progress – drop W-ACK");
         return Ok(TC_ACT_SHOT);
     }
 
     // ensure the ACK is for the current operation
-    let wc_current = WRITE_COUNTER.get(0).map(|c| c.val).unwrap_or(0);
-    if pkt.msg.counter.to_native() != wc_current {
+    let wc_now = WRITE_COUNTER.get(0).map_or(0, |c| c.val);
+    if pkt.msg.counter.to_native() != wc_now {
         warn!(
             ctx,
             "W-ACK counter mismatch (expected {}, got {})",
-            wc_current,
+            wc_now,
             pkt.msg.counter.to_native()
         );
         return Ok(TC_ACT_SHOT);
@@ -166,7 +151,7 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
     debug!(ctx, "Received W-ACK from @{}", pkt.msg.sender.to_native());
 
     // bump ack counter
-    let new_acks = map_increment_locked(ctx, &ACK_COUNT, 0)?;
+    let new_acks = map_increment_locked(&ACK_COUNT, 0)?;
 
     // check if we have enough ACKs
     let majority = u64::from(((read_global(&NUM_NODES)) >> 1) + 1);
@@ -178,41 +163,34 @@ fn handle_write_ack(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
         return Ok(TC_ACT_SHOT);
     }
 
-    info!(ctx, "WRITE committed, majority ({}) reached", majority);
+    info!(ctx, "Committed");
 
     // reset status back to idle
-    map_update_locked(ctx, &STATUS, 0, &0)?;
+    map_update_locked(&STATUS, 0, &0)?;
 
     send_write_ack_to_client(ctx, pkt)
-        .inspect_err(|_| error!(ctx, "Failed to redirect W-ACK to client"))
 }
 
 /// After write commit, send a W-ACK back to original client
-fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> {
+fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> Result<i32, AbdError> {
     munge!(let ArchivedAbdMessage { mut counter, mut sender, mut tag, .. } = pkt.msg);
 
     // set ABD message values in-place (clearing internal fields)
-    let mut udp_csum = pkt.udph.check;
+    let mut udp_csum = pkt.udp.check;
 
     let my_id = read_global(&NODE_ID);
-    recompute_udp_csum_for_abd(ctx, &sender, &my_id.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&sender, &my_id.into(), &mut udp_csum)?;
     *sender = my_id.into();
 
-    recompute_udp_csum_for_abd(ctx, &tag, &0.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&tag, &0.into(), &mut udp_csum)?;
     *tag = 0.into();
 
-    recompute_udp_csum_for_abd(ctx, &counter, &0.into(), &mut udp_csum)?;
+    recompute_udp_csum_for_abd_update(&counter, &0.into(), &mut udp_csum)?;
     *counter = 0.into();
-    pkt.udph.check = udp_csum;
+    pkt.udp.check = udp_csum;
 
-    let client = CLIENT_INFO.get(0).ok_or_else(|| {
-        error!(ctx, "Failed to get client info");
-        TC_ACT_SHOT
-    })?;
-    let me = NODES.get(my_id).ok_or_else(|| {
-        error!(ctx, "Failed to get info for self (@{})", my_id);
-        TC_ACT_SHOT
-    })?;
+    let client = CLIENT_INFO.get(0).ok_or(AbdError::MapLookupError)?;
+    let me = NODES.get(my_id).ok_or(AbdError::MapLookupError)?;
     redirect_to_client(ctx, client, me).inspect(|_| {
         info!(ctx, "W-ACK -> {}", client.ipv4);
     })
@@ -220,6 +198,6 @@ fn send_write_ack_to_client(ctx: &TcContext, pkt: AbdContext) -> BpfResult<i32> 
 
 #[cfg(not(test))]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
+const fn panic(_info: &core::panic::PanicInfo) -> ! {
     loop {}
 }
