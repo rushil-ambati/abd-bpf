@@ -30,10 +30,3 @@ pub const fn gt(a: AbdTag, b: AbdTag) -> bool {
     let sb = seq(b);
     sa > sb || (sa == sb && wid(a) > wid(b))
 }
-
-/// Increase the sequence part and keep the writer-id.
-#[inline(always)]
-#[must_use]
-pub const fn bump_seq(tag: u64) -> u64 {
-    pack(seq(tag) + 1, wid(tag))
-}

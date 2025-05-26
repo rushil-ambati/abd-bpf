@@ -14,16 +14,12 @@ rkyv = { workspace = true }
 which = { workspace = true }
 
 [[bin]]
-name = "reader"
-path = "src/reader.rs"
+name = "abd-tc"
+path = "src/abd_tc.rs"
 
 [[bin]]
-name = "server"
-path = "src/server.rs"
-
-[[bin]]
-name = "writer"
-path = "src/writer.rs"
+name = "abd-xdp"
+path = "src/abd_xdp.rs"
 
 [[bin]]
 name = "xdp-pass"

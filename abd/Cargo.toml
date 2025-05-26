@@ -30,12 +30,12 @@ aya-build = { workspace = true }
 abd-ebpf = { path = "../abd-ebpf" }
 
 [[bin]]
-name = "node"
-path = "src/bin/node.rs"
+name = "abd-tc"
+path = "src/bin/abd_tc.rs"
 
 [[bin]]
-name = "server"
-path = "src/bin/server.rs"
+name = "abd-xdp"
+path = "src/bin/abd_xdp.rs"
 
 [[bin]]
 name = "xdp-pass"

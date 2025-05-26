@@ -53,8 +53,8 @@ static COUNTERS: Array<Counter> = Array::with_max_entries(ABD_MAX_NODES * 2, 0);
 
 #[allow(clippy::needless_pass_by_value)]
 #[xdp]
-pub fn server(ctx: XdpContext) -> u32 {
-    match try_server(&ctx) {
+pub fn abd_xdp(ctx: XdpContext) -> u32 {
+    match try_abd_xdp(&ctx) {
         Ok(ret) => ret,
         Err(err) => {
             error!(&ctx, "{}", err.as_ref());
@@ -63,7 +63,7 @@ pub fn server(ctx: XdpContext) -> u32 {
     }
 }
 
-fn try_server(ctx: &XdpContext) -> Result<u32, AbdError> {
+fn try_abd_xdp(ctx: &XdpContext) -> Result<u32, AbdError> {
     let my_id = read_global(&NODE_ID);
     if my_id == 0 {
         return Err(AbdError::GlobalUnset);
@@ -73,7 +73,6 @@ fn try_server(ctx: &XdpContext) -> Result<u32, AbdError> {
         return Ok(XDP_PASS);
     };
 
-    // Validate roles and sender ID
     let recipient_role = AbdRole::try_from(pkt.msg.recipient_role.to_native())
         .map_err(|()| AbdError::InvalidReceiverRole)?;
     if recipient_role != AbdRole::Server {

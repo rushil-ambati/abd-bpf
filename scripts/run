@@ -120,16 +120,16 @@ for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/'); do
     bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
 done
 
-# Run a server, reader and writer on each node
+# Bring up each node
 for i in $(seq 1 "$NUM_NODES"); do
   env="node$i"
 
-  run_bg --no-tail "server$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/server \
+  run_bg --no-tail node"$i"_xdp sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/abd-xdp \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 
-  run_bg --no-tail "node$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/node \
+  run_bg --no-tail node"$i"_tc sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/abd-tc \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 done
 

@@ -21,6 +21,21 @@ use super::{
     error::AbdError,
 };
 
+/// For map accesses
+pub const ABD_WRITER_IDX: u32 = 0;
+pub const ABD_READER_IDX: u32 = 1;
+
+/// For debugging
+#[inline(always)]
+#[must_use]
+pub const fn itos(i: u32) -> &'static str {
+    match i {
+        ABD_WRITER_IDX => "writer",
+        ABD_READER_IDX => "reader",
+        _ => "unknown",
+    }
+}
+
 /// Broadcasts the current packet to every replica.
 #[inline(always)]
 pub fn broadcast_to_nodes(
@@ -29,7 +44,7 @@ pub fn broadcast_to_nodes(
     nodes_map: &Array<NodeInfo>,
     num_nodes: u32,
 ) -> Result<(), AbdError> {
-    // servers must reply on main UDP port
+    // must reply on our port
     set_udp_src_port(ctx, ABD_UDP_PORT)?;
 
     // dest port is assumed to already be set to ABD_UDP_PORT
@@ -84,6 +99,7 @@ pub fn redirect_to_client(
 pub fn store_client_info(
     ctx: &TcContext,
     client_map: &Array<ClientInfo>,
+    index: u32,
     pkt: &AbdContext,
 ) -> Result<(), AbdError> {
     let client = ClientInfo::new(
@@ -92,7 +108,7 @@ pub fn store_client_info(
         pkt.eth.src_addr,
         u16::from_be(pkt.udp.source),
     );
-    map_update(client_map, 0, &client)
+    map_update(client_map, index, &client)
 }
 
 /// Set the UDP source port in the packet header.

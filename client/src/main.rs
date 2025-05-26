@@ -32,9 +32,9 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct CommonOpts {
-    /// IPv4 address of the target server
+    /// IPv4 address of the target node
     #[arg()]
-    server: Ipv4Addr,
+    node: Ipv4Addr,
 
     /// Sender ID (0 = writer)
     #[arg(short = 's', long)]
@@ -47,10 +47,6 @@ struct CommonOpts {
     /// Tag value
     #[arg(short = 't', long)]
     tag: Option<u64>,
-
-    /// Use internal server port instead of node port
-    #[arg(long)]
-    server_mode: bool,
 }
 
 #[derive(Args, Debug)]
@@ -80,9 +76,9 @@ fn main() -> anyhow::Result<()> {
         Command::Read(_) => AbdMessageType::ReadAck,
     };
 
-    let (server_addr, msg, label) = match cli.command {
+    let (node_addr, msg, label) = match cli.command {
         Command::Write(opts) => {
-            let server = opts.common.server;
+            let node = opts.common.node;
             let sender_id = opts.common.sender_id.unwrap_or(0);
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
@@ -108,11 +104,11 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            (SocketAddrV4::new(node, ABD_UDP_PORT), msg, label)
         }
 
         Command::Read(opts) => {
-            let server = opts.common.server;
+            let node = opts.common.node;
             let sender_id = opts.common.sender_id.unwrap_or_default();
             let counter = opts.common.counter.unwrap_or_default();
             let tag = opts.common.tag.unwrap_or_default();
@@ -138,7 +134,7 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
+            (SocketAddrV4::new(node, ABD_UDP_PORT), msg, label)
         }
     };
 
@@ -146,10 +142,10 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("{label} -> {server_addr}");
+    info!("{label} -> {node_addr}");
 
     let start = Instant::now();
-    sock.send_to(&payload, server_addr)?;
+    sock.send_to(&payload, node_addr)?;
     debug!("Sent {} bytes", payload.len());
 
     let mut buf = vec![0u8; 65_535].into_boxed_slice();

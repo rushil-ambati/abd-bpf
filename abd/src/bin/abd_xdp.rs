@@ -11,7 +11,7 @@ use log::{debug, info, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
-/// An XDP program which implements an ABD server
+/// An XDP program which implements an ABD replica server
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
@@ -76,13 +76,13 @@ async fn main() -> anyhow::Result<()> {
         .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/server"
+            "/abd-xdp"
         )))?;
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
         // This can happen if you remove all log statements from your eBPF program.
         warn!("failed to initialize eBPF logger: {e}");
     }
-    let program: &mut Xdp = ebpf.program_mut("server").unwrap().try_into()?;
+    let program: &mut Xdp = ebpf.program_mut("abd_xdp").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
