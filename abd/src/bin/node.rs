@@ -2,7 +2,10 @@ use std::io::Write;
 
 use abd::populate_nodes_map;
 use aya::{
-    programs::{tc, SchedClassifier, TcAttachType},
+    programs::{
+        tc::{self, NlOptions, TcAttachOptions},
+        SchedClassifier, TcAttachType,
+    },
     EbpfLoader,
 };
 use clap::Parser;
@@ -10,7 +13,7 @@ use log::{debug, info, logger, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
-/// Load and attach the ABD reader (TC egress) to the server NIC.
+/// Load and attach the ABD writer and reader to an interface.
 #[derive(Parser, Debug)]
 struct Args {
     /// Network interface to attach to
@@ -65,33 +68,58 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
-    let mut ebpf = EbpfLoader::new()
+    let mut ebpf_writer = EbpfLoader::new()
+        .set_global("NUM_NODES", &num_nodes, true)
+        .set_global("NODE_ID", &node_id, true)
+        .load(aya::include_bytes_aligned!(concat!(
+            env!("OUT_DIR"),
+            "/writer"
+        )))?;
+    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf_writer, logger()) {
+        warn!("failed to initialize eBPF logger: {e}");
+    }
+
+    let mut ebpf_reader = EbpfLoader::new()
         .set_global("NUM_NODES", &num_nodes, true)
         .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/reader"
         )))?;
-    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf, logger()) {
-        // This can happen if you remove all log statements from your eBPF program.
+    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf_reader, logger()) {
         warn!("failed to initialize eBPF logger: {e}");
     }
 
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&iface);
-    let program: &mut SchedClassifier = ebpf.program_mut("reader").unwrap().try_into()?;
-    program.load()?;
-    program.attach(&iface, TcAttachType::Ingress)?;
+
+    let writer_program: &mut SchedClassifier =
+        ebpf_writer.program_mut("writer").unwrap().try_into()?;
+    writer_program.load()?;
+    writer_program.attach_with_options(
+        &iface,
+        TcAttachType::Ingress,
+        TcAttachOptions::Netlink(NlOptions::default()),
+    )?;
+
+    let reader_program: &mut SchedClassifier =
+        ebpf_reader.program_mut("reader").unwrap().try_into()?;
+    reader_program.load()?;
+    reader_program.attach_with_options(
+        &iface,
+        TcAttachType::Ingress,
+        TcAttachOptions::Netlink(NlOptions::default()),
+    )?;
 
     // Populate the info maps
     let network_interfaces = NetworkInterface::show().unwrap();
-    let nodes_map = ebpf.map_mut("NODES").unwrap();
-    populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;
+
+    let writer_nodes_map = ebpf_writer.map_mut("NODES").unwrap();
+    populate_nodes_map(writer_nodes_map, &network_interfaces, num_nodes)?;
+
+    let reader_nodes_map = ebpf_reader.map_mut("NODES").unwrap();
+    populate_nodes_map(reader_nodes_map, &network_interfaces, num_nodes)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

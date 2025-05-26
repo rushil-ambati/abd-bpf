@@ -1,7 +1,7 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
+    constants::ABD_UDP_PORT,
     map_types::{ClientInfo, NodeInfo},
 };
 use aya_ebpf::{
@@ -32,8 +32,7 @@ pub fn broadcast_to_nodes(
     // servers must reply on main UDP port
     set_udp_src_port(ctx, ABD_UDP_PORT)?;
 
-    // send on server port
-    set_udp_dst_port(ctx, ABD_SERVER_UDP_PORT)?;
+    // dest port is assumed to already be set to ABD_UDP_PORT
 
     // set L3/L2 source addresses as our own
     let me = nodes_map.get(my_id).ok_or(AbdError::MapLookupError)?;

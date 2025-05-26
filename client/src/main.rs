@@ -6,7 +6,8 @@ use std::{
 
 use abd_common::{
     constants::ABD_UDP_PORT,
-    message::{AbdMessage, AbdMessageData, AbdMessageType, ArchivedAbdMessage},
+    message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
+    tag,
 };
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
@@ -86,11 +87,19 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
-            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.data);
+            let msg = AbdMessage::new(
+                counter,
+                opts.data,
+                AbdRole::Writer,
+                sender_id,
+                AbdRole::Client,
+                tag,
+                AbdMessageType::Write,
+            );
             let mut label = format!("WRITE({})", opts.data);
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag={tag}");
+                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
@@ -99,12 +108,7 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            let port = if opts.common.server_mode {
-                abd_common::constants::ABD_SERVER_UDP_PORT
-            } else {
-                ABD_UDP_PORT
-            };
-            (SocketAddrV4::new(server, port), msg, label)
+            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
         }
 
         Command::Read(opts) => {
@@ -115,15 +119,17 @@ fn main() -> anyhow::Result<()> {
 
             let msg = AbdMessage::new(
                 counter,
+                AbdMessageData::default(),
+                AbdRole::Reader,
                 sender_id,
+                AbdRole::Client,
                 tag,
                 AbdMessageType::Read,
-                AbdMessageData::default(),
             );
             let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag={tag}");
+                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
@@ -132,12 +138,7 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            let port = if opts.common.server_mode {
-                abd_common::constants::ABD_SERVER_UDP_PORT
-            } else {
-                ABD_UDP_PORT
-            };
-            (SocketAddrV4::new(server, port), msg, label)
+            (SocketAddrV4::new(server, ABD_UDP_PORT), msg, label)
         }
     };
 
@@ -173,27 +174,34 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
                 AbdMessageType::ReadAck => {
                     info!(
                         "R-ACK({}) from @{}, took={elapsed:?}",
-                        resp.data, resp.sender
+                        resp.data, resp.sender_id
                     );
                 }
                 AbdMessageType::WriteAck => {
-                    info!("W-ACK from @{}, took={elapsed:?}", resp.sender);
+                    info!("W-ACK from @{}, took={elapsed:?}", resp.sender_id);
                 }
                 _ => {}
             }
             debug!(
-                "sender={} tag={} value={:?} counter={}",
-                resp.sender, resp.tag, resp.data, resp.counter
+                "sender={} tag=<{},{}> value={:?} counter={}",
+                resp.sender_id,
+                tag::seq(resp.tag),
+                tag::wid(resp.tag),
+                resp.data,
+                resp.counter
             );
         }
         Ok(unexpected) => {
             warn!(
                 "Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
-                resp.sender
+                resp.sender_id
             );
         }
         Err(()) => {
-            warn!("Unknown message type: {} from @{}", resp.type_, resp.sender);
+            warn!(
+                "Unknown message type: {} from @{}",
+                resp.type_, resp.sender_id
+            );
         }
     }
 }
