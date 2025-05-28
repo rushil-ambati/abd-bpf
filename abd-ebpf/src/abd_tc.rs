@@ -14,10 +14,7 @@ use abd_ebpf::utils::{
     },
     error::AbdError,
     spinlock::{spin_lock_release, try_spin_lock_acquire},
-    tc::{
-        self, broadcast_to_nodes, redirect_to_client, store_client_info, ABD_READER_IDX,
-        ABD_WRITER_IDX,
-    },
+    tc::{self, broadcast_to_nodes, redirect_to_client, store_client_info, ABD_R_IDX, ABD_W_IDX},
 };
 use aya_ebpf::{
     bindings::{BPF_F_RDONLY_PROG, TC_ACT_PIPE, TC_ACT_SHOT, TC_ACT_STOLEN},
@@ -44,13 +41,15 @@ static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDO
 #[map]
 static CLIENT_INFO: Array<ClientInfo> = Array::with_max_entries(2, 0);
 
-/// 0 = idle, 1/2 = Phase-1/2
+/// 0 = idle, 1 = query phase, 2 = propagation phase
 #[map]
 static STATUS: Array<Status> = Array::with_max_entries(2, 0);
 
-/// Phase-1 aggregation (largest tag & its data)
+/// Reader: largest tag and corresponding data from query aggregation
+/// Single-writer: tag = current tag, data unused
+/// Multi-writer: largest tag from query aggregation, data to be written
 #[map]
-static MAX_TAG_DATA: Array<TaggedData> = Array::with_max_entries(2, 0);
+static TAG_DATA: Array<TaggedData> = Array::with_max_entries(2, 0);
 
 /// Monotonically-increasing
 #[map]
@@ -106,7 +105,11 @@ fn try_abd_tc(ctx: &TcContext) -> Result<i32, AbdError> {
             info!(ctx, "received WRITE request");
             handle_write(ctx, pkt, my_id, num_nodes)
         }
-        (AbdMessageType::ReadAck, AbdRole::Reader | AbdRole::Writer, AbdRole::Server) => {
+        (AbdMessageType::ReadAck, AbdRole::Reader, AbdRole::Server) => {
+            handle_read_ack(ctx, pkt, recipient_role, my_id, num_nodes)
+        }
+        #[cfg(feature = "multi-writer")]
+        (AbdMessageType::ReadAck, AbdRole::Writer, AbdRole::Server) => {
             handle_read_ack(ctx, pkt, recipient_role, my_id, num_nodes)
         }
         (AbdMessageType::WriteAck, AbdRole::Reader | AbdRole::Writer, AbdRole::Server) => {
@@ -116,42 +119,42 @@ fn try_abd_tc(ctx: &TcContext) -> Result<i32, AbdError> {
     }
 }
 
-/// Handle a READ request from a client (Phase-1)
+/// Handle a READ request from a client
 fn handle_read(
     ctx: &TcContext,
     pkt: AbdContext,
     my_id: u32,
     num_nodes: u32,
 ) -> Result<i32, AbdError> {
-    let i = ABD_READER_IDX;
+    let i = ABD_R_IDX;
 
     if STATUS.get(i).map_or(0, |s| s.val) != 0 {
         warn!(ctx, "drop READ, busy", itos(i));
         return Ok(TC_ACT_SHOT);
     }
 
-    // set status to Phase-1
     map_update_locked(&STATUS, i, &1)?;
 
-    // initialise Phase-1 state
     map_update_locked(&ACK_COUNT, i, &0)?;
-    {
-        // reset MAX_TAG_DATA (under its tag's lock)
-        let max = map_get_mut(&MAX_TAG_DATA, i)?;
-        try_spin_lock_acquire(&mut max.tag.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
-        max.tag.val = 0;
-        spin_lock_release(&mut max.tag.lock);
-    }
+
+    let max_tag_data = map_get_mut(&TAG_DATA, i)?;
+    try_spin_lock_acquire(&mut max_tag_data.tag.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
+    max_tag_data.tag.val = 0;
+    spin_lock_release(&mut max_tag_data.tag.lock);
 
     // remember client
-    store_client_info(ctx, &CLIENT_INFO, i, &pkt)?;
+    store_client_info(&NODES, my_id, &CLIENT_INFO, i, &pkt)?;
 
     // increment counter
     let new_counter = map_increment_locked(&COUNTER, i)?;
 
     // craft query packet
     munge!(let ArchivedAbdMessage { mut counter, mut recipient_role, mut sender_id, mut sender_role, .. } = pkt.msg);
+
     let mut udp_csum = pkt.udp.check;
+
+    recompute_udp_csum_for_abd_update(&counter, &new_counter.into(), &mut udp_csum)?;
+    *counter = new_counter.into();
 
     let new_recipient_role = AbdRole::Server.into();
     recompute_udp_csum_for_abd_update(&recipient_role, &new_recipient_role, &mut udp_csum)?;
@@ -164,60 +167,88 @@ fn handle_read(
     recompute_udp_csum_for_abd_update(&sender_id, &my_id.into(), &mut udp_csum)?;
     *sender_id = my_id.into();
 
-    recompute_udp_csum_for_abd_update(&counter, &new_counter.into(), &mut udp_csum)?;
-    *counter = new_counter.into();
-
     pkt.udp.check = udp_csum;
 
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes).map(|()| TC_ACT_STOLEN)
 }
 
-/// Handle a WRITE message from a client (Phase-1).
+/// Handle a WRITE message from a client.
 fn handle_write(
     ctx: &TcContext,
     pkt: AbdContext,
     my_id: u32,
     num_nodes: u32,
 ) -> Result<i32, AbdError> {
-    if STATUS.get(ABD_WRITER_IDX).map_or(0, |s| s.val) != 0 {
+    #[cfg(not(feature = "multi-writer"))]
+    if my_id != 1 {
+        // forward the request to the sole writer
+        munge!(let ArchivedAbdMessage { mut sender_id, .. } = pkt.msg);
+
+        let mut udp_csum = pkt.udp.check;
+
+        // set sender_id to my_id, so writer knows it's a proxied request
+        recompute_udp_csum_for_abd_update(&sender_id, &my_id.into(), &mut udp_csum)?;
+        *sender_id = my_id.into();
+
+        pkt.udp.check = udp_csum;
+
+        let writer = NODES.get(1).ok_or(AbdError::MapLookupError)?;
+        info!(ctx, "forwarding WRITE to writer");
+        return tc::redirect_to_node(ctx, writer);
+    }
+
+    if STATUS.get(ABD_W_IDX).map_or(0, |s| s.val) != 0 {
         warn!(ctx, "drop WRITE, busy");
         return Ok(TC_ACT_SHOT);
     }
 
-    // set status to Phase-1
-    map_update_locked(&STATUS, ABD_WRITER_IDX, &1)?;
+    #[cfg(not(feature = "multi-writer"))]
+    map_update_locked(&STATUS, ABD_W_IDX, &2)?; // no query phase, go straight to propagation
+    #[cfg(feature = "multi-writer")]
+    map_update_locked(&STATUS, ABD_W_IDX, &1)?;
 
-    // initialise Phase-1 state
-    map_update_locked(&ACK_COUNT, ABD_WRITER_IDX, &0)?;
+    // initialise state
+    map_update_locked(&ACK_COUNT, ABD_W_IDX, &0)?;
+
+    let tag_data = map_get_mut(&TAG_DATA, ABD_W_IDX)?;
+    try_spin_lock_acquire(&mut tag_data.tag.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
+    #[cfg(not(feature = "multi-writer"))]
     {
-        let max = map_get_mut(&MAX_TAG_DATA, ABD_WRITER_IDX)?;
-        try_spin_lock_acquire(&mut max.tag.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
+        // increment tag seq
+        tag_data.tag.val = tag::pack(tag::seq(tag_data.tag.val) + 1, 0);
+    }
+    #[cfg(feature = "multi-writer")]
+    {
         // initial tag = <0,w>
-        max.tag.val = tag::pack(0, my_id);
-        // store the data to be written for later in Phase-2
+        tag_data.tag.val = tag::pack(0, my_id);
+
+        // store the data to be written for later, in the propagation phase
         unsafe {
             core::ptr::copy_nonoverlapping(
                 core::ptr::from_ref::<ArchivedAbdMessageData>(&pkt.msg.data).cast::<u8>(),
-                &raw const max.data as *mut u8,
+                &raw const tag_data.data as *mut u8,
                 size_of::<ArchivedAbdMessageData>(),
             );
         }
-        spin_lock_release(&mut max.tag.lock);
     }
+    spin_lock_release(&mut tag_data.tag.lock);
 
     // remember client
-    store_client_info(ctx, &CLIENT_INFO, ABD_WRITER_IDX, &pkt)?;
+    store_client_info(&NODES, my_id, &CLIENT_INFO, ABD_W_IDX, &pkt)?;
 
     // increment counter
-    let new_counter = map_increment_locked(&COUNTER, ABD_WRITER_IDX)?;
+    let new_counter = map_increment_locked(&COUNTER, ABD_W_IDX)?;
 
     // craft query packet
+    #[cfg(not(feature = "multi-writer"))]
+    munge!(let ArchivedAbdMessage { mut counter, mut recipient_role, mut sender_id, mut sender_role, mut tag, .. } = pkt.msg);
+    #[cfg(feature = "multi-writer")]
     munge!(let ArchivedAbdMessage { mut counter, mut recipient_role, mut sender_id, mut sender_role, mut type_, .. } = pkt.msg);
+
     let mut udp_csum = pkt.udp.check;
 
-    let new_msg_type = AbdMessageType::Read.into();
-    recompute_udp_csum_for_abd_update(&type_, &new_msg_type, &mut udp_csum)?;
-    *type_ = new_msg_type;
+    recompute_udp_csum_for_abd_update(&counter, &new_counter.into(), &mut udp_csum)?;
+    *counter = new_counter.into();
 
     let new_recipient_role = AbdRole::Server.into();
     recompute_udp_csum_for_abd_update(&recipient_role, &new_recipient_role, &mut udp_csum)?;
@@ -230,15 +261,25 @@ fn handle_write(
     recompute_udp_csum_for_abd_update(&sender_id, &my_id.into(), &mut udp_csum)?;
     *sender_id = my_id.into();
 
-    recompute_udp_csum_for_abd_update(&counter, &new_counter.into(), &mut udp_csum)?;
-    *counter = new_counter.into();
+    #[cfg(not(feature = "multi-writer"))]
+    {
+        let new_tag = tag_data.tag.val;
+        recompute_udp_csum_for_abd_update(&tag, &new_tag.into(), &mut udp_csum)?;
+        *tag = new_tag.into();
+    }
+    #[cfg(feature = "multi-writer")]
+    {
+        let new_msg_type = AbdMessageType::Read.into();
+        recompute_udp_csum_for_abd_update(&type_, &new_msg_type, &mut udp_csum)?;
+        *type_ = new_msg_type;
+    }
 
     pkt.udp.check = udp_csum;
 
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes).map(|()| TC_ACT_STOLEN)
 }
 
-/// Handle a R-ACK from a replica (Phase-1)
+/// Handle a R-ACK from a replica (query phase)
 fn handle_read_ack(
     ctx: &TcContext,
     pkt: AbdContext,
@@ -247,15 +288,15 @@ fn handle_read_ack(
     num_nodes: u32,
 ) -> Result<i32, AbdError> {
     let i = match my_role {
-        AbdRole::Reader => ABD_READER_IDX,
-        AbdRole::Writer => ABD_WRITER_IDX,
+        AbdRole::Reader => ABD_R_IDX,
+        AbdRole::Writer => ABD_W_IDX,
         _ => return Err(AbdError::InvalidSenderRole),
     };
 
     if STATUS.get(i).map_or(0, |s| s.val) != 1 {
         debug!(
             ctx,
-            "{}: ignore R-ACK from @{}, not in Phase-1",
+            "{}: ignore R-ACK from @{}, not in phase 1",
             tc::itos(i),
             pkt.msg.sender_id.to_native()
         );
@@ -285,7 +326,7 @@ fn handle_read_ack(
     );
 
     // maybe update max tag & data
-    let max = map_get_mut(&MAX_TAG_DATA, i)?;
+    let max = map_get_mut(&TAG_DATA, i)?;
     try_spin_lock_acquire(&mut max.tag.lock)?;
     if tag::gt(pkt.msg.tag.to_native(), max.tag.val) {
         max.tag.val = pkt.msg.tag.to_native();
@@ -319,13 +360,14 @@ fn handle_read_ack(
 
     info!(ctx, "{}: got majority R-ACKs", tc::itos(i));
 
-    // proceed to Phase-2
+    // proceed to phase 2
     map_update_locked(&STATUS, i, &2)?;
     let new_counter = map_increment_locked(&COUNTER, i)?;
     map_update_locked(&ACK_COUNT, i, &0)?;
 
     // craft propagation packet
     munge!(let ArchivedAbdMessage { mut counter, data, mut recipient_role, mut sender_id, mut sender_role, mut tag, mut type_, .. } = pkt.msg);
+
     let mut udp_csum = pkt.udp.check;
 
     let new_sender_role: u32 = my_role.into();
@@ -343,7 +385,7 @@ fn handle_read_ack(
     recompute_udp_csum_for_abd_update(&type_, &new_type, &mut udp_csum)?;
     *type_ = new_type;
 
-    let max = MAX_TAG_DATA.get(i).ok_or(AbdError::MapLookupError)?;
+    let max = TAG_DATA.get(i).ok_or(AbdError::MapLookupError)?;
     let new_tag = match my_role {
         AbdRole::Reader => max.tag.val,
         AbdRole::Writer => {
@@ -374,7 +416,7 @@ fn handle_read_ack(
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes).map(|()| TC_ACT_STOLEN)
 }
 
-/// Handle a W-ACK from a replica (Phase-2)
+/// Handle a W-ACK from a replica
 fn handle_write_ack(
     ctx: &TcContext,
     pkt: AbdContext,
@@ -383,15 +425,23 @@ fn handle_write_ack(
     num_nodes: u32,
 ) -> Result<i32, AbdError> {
     let i = match my_role {
-        AbdRole::Reader => ABD_READER_IDX,
-        AbdRole::Writer => ABD_WRITER_IDX,
+        AbdRole::Reader => ABD_R_IDX,
+        AbdRole::Writer => {
+            #[cfg(not(feature = "multi-writer"))]
+            if my_id != 1 {
+                warn!(ctx, "drop W-ACK, not writer");
+                return Ok(TC_ACT_SHOT);
+            }
+
+            ABD_W_IDX
+        }
         _ => return Err(AbdError::InvalidSenderRole),
     };
 
     if STATUS.get(i).map_or(0, |s| s.val) != 2 {
         debug!(
             ctx,
-            "{}: ignore W-ACK from @{}, not in Phase-2",
+            "{}: ignore W-ACK from @{}, not in phase 2",
             tc::itos(i),
             pkt.msg.sender_id.to_native()
         );
@@ -438,6 +488,7 @@ fn handle_write_ack(
 
     // craft ACK to client
     munge!(let ArchivedAbdMessage { mut counter, mut recipient_role, mut sender_id, mut sender_role, mut type_, .. } = pkt.msg);
+
     let mut udp_csum = pkt.udp.check;
 
     let new_sender_role: u32 = AbdRole::Reader.into();
@@ -457,7 +508,7 @@ fn handle_write_ack(
         *type_ = new_type;
     }
 
-    // tag and value should be the same as the original write
+    // tag and value are be the same as the original write
 
     recompute_udp_csum_for_abd_update(&counter, &0.into(), &mut udp_csum)?;
     *counter = 0.into();

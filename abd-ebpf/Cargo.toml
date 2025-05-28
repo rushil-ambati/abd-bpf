@@ -3,6 +3,10 @@ name = "abd-ebpf"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = ["multi-writer"]
+multi-writer = []
+
 [dependencies]
 abd-common = { path = "../abd-common" }
 aya-ebpf = { workspace = true }
