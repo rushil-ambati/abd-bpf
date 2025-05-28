@@ -1,19 +1,17 @@
 use std::io::Write;
 
 use abd::populate_nodes_map;
-use anyhow::Context;
 use aya::{
-    programs::{Xdp, XdpFlags},
+    programs::{tc, SchedClassifier, TcAttachType},
     EbpfLoader,
 };
 use clap::Parser;
-use log::{debug, info, warn};
+use log::{debug, info, logger, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
-/// An XDP program which implements an ABD server
+/// Load and attach the ABD writer and reader to an interface.
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
 struct Args {
     /// Network interface to attach to
     #[arg(long, default_value = "eth0")]
@@ -32,8 +30,8 @@ struct Args {
 async fn main() -> anyhow::Result<()> {
     let Args {
         iface,
-        node_id,
         num_nodes,
+        node_id,
     } = Args::parse();
 
     // Check that the node_id is valid
@@ -67,27 +65,26 @@ async fn main() -> anyhow::Result<()> {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
     let mut ebpf = EbpfLoader::new()
         .set_global("NUM_NODES", &num_nodes, true)
         .set_global("NODE_ID", &node_id, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
-            "/server"
+            "/abd-tc"
         )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        // This can happen if you remove all log statements from your eBPF program.
+    if let Err(e) = aya_log::EbpfLogger::init_with_logger(&mut ebpf, logger()) {
         warn!("failed to initialize eBPF logger: {e}");
     }
-    let program: &mut Xdp = ebpf.program_mut("server").unwrap().try_into()?;
-    program.load()?;
-    program.attach(&iface, XdpFlags::default())
-        .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
-    // Populate the info maps
+    // error adding clsact to the interface if it is already added is harmless
+    // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
+    let _ = tc::qdisc_add_clsact(&iface);
+
+    let program: &mut SchedClassifier = ebpf.program_mut("abd_tc").unwrap().try_into()?;
+    program.load()?;
+    program.attach(&iface, TcAttachType::Ingress)?;
+
+    // Populate the info map
     let network_interfaces = NetworkInterface::show().unwrap();
     let nodes_map = ebpf.map_mut("NODES").unwrap();
     populate_nodes_map(nodes_map, &network_interfaces, num_nodes)?;

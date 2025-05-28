@@ -4,7 +4,11 @@ use core::{
     slice,
 };
 
-use abd_common::{constants::ABD_MAGIC, map_types::Locked, message::ArchivedAbdMessage};
+use abd_common::{
+    constants::{ABD_MAGIC, ABD_UDP_PORT},
+    map_types::Locked,
+    message::ArchivedAbdMessage,
+};
 use aya_ebpf::{
     helpers::r#gen::bpf_csum_diff,
     maps::Array,
@@ -96,11 +100,7 @@ pub struct AbdContext<'a> {
 
 /// Try to parse an ABD packet from a context.
 ///
-pub fn try_parse_abd_packet<C: PacketCtx>(
-    ctx: &C,
-    udp_port: u16,
-    num_nodes: u32,
-) -> Result<Option<AbdContext>, AbdError> {
+pub fn try_parse_abd_packet<C: PacketCtx>(ctx: &C) -> Result<Option<AbdContext>, AbdError> {
     let eth_hdr: *mut EthHdr = ctx.ptr_at_mut(0).ok_or(AbdError::HeaderParsingError)?;
     if unsafe { (*eth_hdr).ether_type } != EtherType::Ipv4 {
         return Ok(None);
@@ -116,7 +116,7 @@ pub fn try_parse_abd_packet<C: PacketCtx>(
     let udp_hdr: *mut UdpHdr = ctx
         .ptr_at_mut(UDP_HDR_OFF)
         .ok_or(AbdError::HeaderParsingError)?;
-    if u16::from_be(unsafe { (*udp_hdr).dest }) != udp_port {
+    if u16::from_be(unsafe { (*udp_hdr).dest }) != ABD_UDP_PORT {
         return Ok(None);
     }
 
@@ -131,11 +131,6 @@ pub fn try_parse_abd_packet<C: PacketCtx>(
     // Check the magic number
     if msg.magic != ABD_MAGIC {
         return Err(AbdError::InvalidMagicNumber);
-    }
-
-    // Check the sender ID
-    if msg.sender > num_nodes {
-        return Err(AbdError::InvalidSenderID);
     }
 
     // Convert all the header pointers to mutable references

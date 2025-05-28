@@ -4,9 +4,10 @@
 use core::mem;
 
 use abd_common::{
-    constants::{ABD_MAX_NODES, ABD_SERVER_UDP_PORT},
-    map_types::{Counter, NodeInfo, TagValue},
-    message::{AbdMessageType, ArchivedAbdMessage, ArchivedAbdMessageData},
+    constants::ABD_MAX_NODES,
+    map_types::{Counter, NodeInfo, TaggedData},
+    message::{AbdMessageType, AbdRole, ArchivedAbdMessage, ArchivedAbdMessageData},
+    tag,
 };
 use abd_ebpf::utils::{
     common::{
@@ -26,7 +27,7 @@ use aya_ebpf::{
     maps::Array,
     programs::XdpContext,
 };
-use aya_log_ebpf::{debug, error, info};
+use aya_log_ebpf::{error, info};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 use rkyv::munge::munge;
 
@@ -44,16 +45,16 @@ static NODES: Array<NodeInfo> = Array::with_max_entries(ABD_MAX_NODES, BPF_F_RDO
 
 /// Current stored tag (timestamp) and associated data
 #[map]
-static TAG_DATA: Array<TagValue> = Array::with_max_entries(1, 0);
+static TAG_DATA: Array<TaggedData> = Array::with_max_entries(1, 0);
 
-/// Per-node request counters
+/// Per-reader/writer request counters
 #[map]
-static COUNTERS: Array<Counter> = Array::with_max_entries(ABD_MAX_NODES, 0);
+static COUNTERS: Array<Counter> = Array::with_max_entries(ABD_MAX_NODES * 2, 0);
 
 #[allow(clippy::needless_pass_by_value)]
 #[xdp]
-pub fn server(ctx: XdpContext) -> u32 {
-    match try_server(&ctx) {
+pub fn abd_xdp(ctx: XdpContext) -> u32 {
+    match try_abd_xdp(&ctx) {
         Ok(ret) => ret,
         Err(err) => {
             error!(&ctx, "{}", err.as_ref());
@@ -62,36 +63,50 @@ pub fn server(ctx: XdpContext) -> u32 {
     }
 }
 
-fn try_server(ctx: &XdpContext) -> Result<u32, AbdError> {
-    let num_nodes = read_global(&NUM_NODES);
-    if num_nodes == 0 {
-        return Err(AbdError::GlobalUnset);
-    }
+fn try_abd_xdp(ctx: &XdpContext) -> Result<u32, AbdError> {
     let my_id = read_global(&NODE_ID);
     if my_id == 0 {
         return Err(AbdError::GlobalUnset);
     }
 
-    let Some(pkt) = try_parse_abd_packet(ctx, ABD_SERVER_UDP_PORT, num_nodes)? else {
+    let Some(pkt) = try_parse_abd_packet(ctx)? else {
         return Ok(XDP_PASS);
     };
+
+    let recipient_role = AbdRole::try_from(pkt.msg.recipient_role.to_native())
+        .map_err(|()| AbdError::InvalidReceiverRole)?;
+    if recipient_role != AbdRole::Server {
+        return Ok(XDP_PASS);
+    }
+    let sender_role = AbdRole::try_from(pkt.msg.sender_role.to_native())
+        .map_err(|()| AbdError::InvalidSenderRole)?;
+    if sender_role != AbdRole::Reader && sender_role != AbdRole::Writer {
+        return Err(AbdError::InvalidSenderRole);
+    }
+    let num_nodes = read_global(&NUM_NODES);
+    if num_nodes == 0 {
+        return Err(AbdError::GlobalUnset);
+    }
+    if pkt.msg.sender_id > num_nodes {
+        return Err(AbdError::InvalidSenderID);
+    }
 
     let msg_type = AbdMessageType::try_from(pkt.msg.type_.to_native())
         .map_err(|()| AbdError::InvalidMessageType)?;
     match msg_type {
-        AbdMessageType::Read => handle_read(ctx, pkt),
-        AbdMessageType::Write => handle_write(ctx, pkt),
+        AbdMessageType::Read => handle_read(ctx, pkt, sender_role),
+        AbdMessageType::Write => handle_write(ctx, pkt, sender_role),
         _ => Err(AbdError::InvalidMessageType),
     }
 }
 
-fn handle_read(ctx: &XdpContext, pkt: AbdContext) -> Result<u32, AbdError> {
-    let sender = pkt.msg.sender.to_native();
+fn handle_read(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
+    let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "READ from @{}", sender);
+    info!(ctx, "READ from @{}", sender_id);
 
-    update_sender_counter_if_newer(sender, counter)?;
+    update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 
     let entry = TAG_DATA.get(0).ok_or(AbdError::MapLookupError)?;
 
@@ -100,28 +115,46 @@ fn handle_read(ctx: &XdpContext, pkt: AbdContext) -> Result<u32, AbdError> {
         AbdMessageType::ReadAck,
         Some(entry.tag.val),
         Some(&entry.data),
-        sender,
+        sender_role,
+        sender_id,
     )
 }
 
-fn handle_write(ctx: &XdpContext, pkt: AbdContext) -> Result<u32, AbdError> {
-    let sender = pkt.msg.sender.to_native();
+fn handle_write(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
+    let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "WRITE from @{}", sender);
+    info!(ctx, "WRITE from @{}", sender_id);
 
-    update_sender_counter_if_newer(sender, counter)?;
+    update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 
     let tag = pkt.msg.tag.to_native();
-    store_tag_and_data_if_newer(ctx, tag, &pkt.msg.data)?;
+    store_tag_and_data_if_newer(tag, &pkt.msg.data)?;
 
-    construct_and_send_ack(pkt, AbdMessageType::WriteAck, None, None, sender)
+    // leave the tag and data alone
+    construct_and_send_ack(
+        pkt,
+        AbdMessageType::WriteAck,
+        None,
+        None,
+        sender_role,
+        sender_id,
+    )
 }
 
 /// Updates the sender counter if the incoming counter is newer
 #[inline(always)]
-fn update_sender_counter_if_newer(sender: u32, incoming_counter: u64) -> Result<(), AbdError> {
-    let counter = map_get_mut(&COUNTERS, sender)?;
+fn update_sender_counter_if_newer(
+    sender_role: AbdRole,
+    sender_id: u32,
+    incoming_counter: u64,
+) -> Result<(), AbdError> {
+    let index = match sender_role {
+        AbdRole::Reader => sender_id,
+        AbdRole::Writer => sender_id + ABD_MAX_NODES,
+        _ => return Err(AbdError::InvalidSenderRole),
+    };
+    let counter = map_get_mut(&COUNTERS, index)?;
 
     try_spin_lock_acquire(&mut counter.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
 
@@ -140,32 +173,23 @@ fn update_sender_counter_if_newer(sender: u32, incoming_counter: u64) -> Result<
 /// Stores new tag and data if tag is newer
 #[inline(always)]
 fn store_tag_and_data_if_newer(
-    ctx: &XdpContext,
     new_tag: u64,
     new_data: &ArchivedAbdMessageData,
 ) -> Result<(), AbdError> {
     let stored = map_get_mut(&TAG_DATA, 0)?;
 
-    try_spin_lock_acquire(&mut stored.tag.lock).map_err(|_| AbdError::LockRetryLimitHit)?;
-
-    if new_tag > stored.tag.val {
+    try_spin_lock_acquire(&mut stored.tag.lock)?;
+    if tag::gt(new_tag, stored.tag.val) {
         stored.tag.val = new_tag;
         unsafe {
             core::ptr::copy_nonoverlapping(
-                core::ptr::from_ref::<ArchivedAbdMessageData>(new_data).cast::<u8>(),
+                core::ptr::from_ref(new_data).cast::<u8>(),
                 &raw const stored.data as *mut u8,
-                size_of::<ArchivedAbdMessageData>(),
+                core::mem::size_of::<ArchivedAbdMessageData>(),
             );
         }
-    } else {
-        debug!(
-            ctx,
-            "Not storing tag {} (current {})", new_tag, stored.tag.val
-        );
     }
-
     spin_lock_release(&mut stored.tag.lock);
-
     Ok(())
 }
 
@@ -176,14 +200,23 @@ fn construct_and_send_ack(
     new_type: AbdMessageType,
     new_tag: Option<u64>,
     new_data: Option<&ArchivedAbdMessageData>,
+    dest_role: AbdRole,
     dest_id: u32,
 ) -> Result<u32, AbdError> {
-    munge!(let ArchivedAbdMessage { mut sender, mut tag, mut type_, data, .. } = pkt.msg);
+    munge!(let ArchivedAbdMessage { data, mut recipient_role, mut sender_id, mut sender_role, mut tag, mut type_, .. } = pkt.msg);
     let mut udp_csum = pkt.udp.check;
 
     let my_id = read_global(&NODE_ID);
-    recompute_udp_csum_for_abd_update(&sender, &my_id.into(), &mut udp_csum)?;
-    *sender = my_id.into();
+    recompute_udp_csum_for_abd_update(&sender_id, &my_id.into(), &mut udp_csum)?;
+    *sender_id = my_id.into();
+
+    let new_sender_role = AbdRole::Server.into();
+    recompute_udp_csum_for_abd_update(&sender_role, &new_sender_role, &mut udp_csum)?;
+    *sender_role = new_sender_role;
+
+    let new_recipient_role = dest_role.into();
+    recompute_udp_csum_for_abd_update(&recipient_role, &new_recipient_role, &mut udp_csum)?;
+    *recipient_role = new_recipient_role;
 
     recompute_udp_csum_for_abd_update(&type_, &new_type.into(), &mut udp_csum)?;
     *type_ = new_type.into();

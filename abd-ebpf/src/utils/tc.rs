@@ -1,7 +1,7 @@
 use core::net::Ipv4Addr;
 
 use abd_common::{
-    constants::{ABD_SERVER_UDP_PORT, ABD_UDP_PORT},
+    constants::ABD_UDP_PORT,
     map_types::{ClientInfo, NodeInfo},
 };
 use aya_ebpf::{
@@ -21,6 +21,21 @@ use super::{
     error::AbdError,
 };
 
+/// For map accesses - writer and reader indices
+pub const ABD_W_IDX: u32 = 0;
+pub const ABD_R_IDX: u32 = 1;
+
+/// For debugging
+#[inline(always)]
+#[must_use]
+pub const fn itos(i: u32) -> &'static str {
+    match i {
+        ABD_W_IDX => "writer",
+        ABD_R_IDX => "reader",
+        _ => "unknown",
+    }
+}
+
 /// Broadcasts the current packet to every replica.
 #[inline(always)]
 pub fn broadcast_to_nodes(
@@ -29,11 +44,10 @@ pub fn broadcast_to_nodes(
     nodes_map: &Array<NodeInfo>,
     num_nodes: u32,
 ) -> Result<(), AbdError> {
-    // servers must reply on main UDP port
+    // must reply on our port
     set_udp_src_port(ctx, ABD_UDP_PORT)?;
 
-    // send on server port
-    set_udp_dst_port(ctx, ABD_SERVER_UDP_PORT)?;
+    // dest port is assumed to already be set to ABD_UDP_PORT
 
     // set L3/L2 source addresses as our own
     let me = nodes_map.get(my_id).ok_or(AbdError::MapLookupError)?;
@@ -80,20 +94,49 @@ pub fn redirect_to_client(
         .ok_or(AbdError::RedirectFailed)
 }
 
+/// Redirects the packet to the given `node`.
+#[inline(always)]
+pub fn redirect_to_node(ctx: &TcContext, node: &NodeInfo) -> Result<i32, AbdError> {
+    // port already correctly set
+    set_ipv4_dst_addr(ctx, node.ipv4)?;
+    set_eth_dst_addr(ctx, &node.mac)?;
+
+    let ret = i32::try_from(unsafe { bpf_redirect(node.ifindex, 0) })
+        .map_err(|_| AbdError::CastFailed)?;
+    (ret == TC_ACT_REDIRECT)
+        .then_some(ret)
+        .ok_or(AbdError::RedirectFailed)
+}
+
 /// Stores client information in the `client_map`.
 #[inline(always)]
 pub fn store_client_info(
-    ctx: &TcContext,
+    nodes_map: &Array<NodeInfo>,
+    my_id: u32,
     client_map: &Array<ClientInfo>,
+    client_map_index: u32,
     pkt: &AbdContext,
 ) -> Result<(), AbdError> {
+    // Sender ID: 0 = direct from a client, >0 = proxied from that node
+    let sender_id = pkt.msg.sender_id.to_native();
+    let node = nodes_map
+        .get(if sender_id == 0 { my_id } else { sender_id })
+        .ok_or(AbdError::MapLookupError)?;
+    let mac = if sender_id == 0 {
+        pkt.eth.src_addr
+    } else {
+        node.mac
+    };
+    let ifindex = node.ifindex;
+
     let client = ClientInfo::new(
-        (unsafe { *ctx.skb.skb }).ingress_ifindex,
+        ifindex,
         Ipv4Addr::from(u32::from_be(pkt.ip.src_addr)),
-        pkt.eth.src_addr,
+        mac,
         u16::from_be(pkt.udp.source),
     );
-    map_update(client_map, 0, &client)
+
+    map_update(client_map, client_map_index, &client)
 }
 
 /// Set the UDP source port in the packet header.

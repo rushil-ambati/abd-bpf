@@ -1,9 +1,9 @@
 use core::net::Ipv4Addr;
 
-use crate::message::ArchivedAbdMessageData;
+use crate::{message::ArchivedAbdMessageData, tag::AbdTag};
 
 pub type SpinLock = u64;
-pub type Tag = Locked<u64>;
+pub type Tag = Locked<AbdTag>;
 pub type Counter = Locked<u64>;
 pub type Status = Locked<u8>; // Each actor defines its own status codes, but zero is always considered "active and idle"
 
@@ -27,7 +27,7 @@ impl<T: Default> Default for Locked<T> {
 /// A tagged/timestamped data entry to be stored on a replica server.
 /// The object lock is inside the `tag`.
 #[repr(C)]
-pub struct TagValue {
+pub struct TaggedData {
     pub tag: Tag,
     pub data: ArchivedAbdMessageData,
 }

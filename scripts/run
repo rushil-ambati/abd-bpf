@@ -108,7 +108,7 @@ else
 fi
 
 # Setup network namespaces
-for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/') writer; do
+for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/'); do
   "${TESTENV[@]}" setup --name "$env" --legacy-ip >/dev/null 2>&1 || true
 
   # Disable UDP TX checksum offloading
@@ -120,55 +120,51 @@ for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/') writer; do
     bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
 done
 
-# Run a server and reader on each node
+# Bring up each node
 for i in $(seq 1 "$NUM_NODES"); do
   env="node$i"
 
-  run_bg --no-tail "server$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/server \
+  run_bg --no-tail node"$i"_xdp sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/abd-xdp \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 
-  run_bg --no-tail "reader$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/reader \
+  run_bg --no-tail node"$i"_tc sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/abd-tc \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 done
-
-# Run writer with info logging
-run_bg --no-tail "writer" sudo -E bash -c \
-  "RUST_LOG=info $TARGET_DIR/writer \
-   --iface writer --num-nodes=$NUM_NODES"
 
 # Wait for services to initialize
 sleep 1
 echo
 
-writer_ip=$(
-  "${TESTENV[@]}" -n writer status |
-    awk '/Iface:/ {print $4}' |
-    cut -d'/' -f1
-)
+# value_base="int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27)"
+value_base="int=88 text=world ip=2001:0db8:85a3:0000:0000:8a2e:0370:7334 duration=3600 point=(-0.3,4.1) person=(Alice,30)"
+for i in $(seq 1 "$NUM_NODES"); do
+  env="node$i"
+  node_ip=$(
+    "${TESTENV[@]}" -n "$env" status |
+      awk '/Iface:/ {print $4}' |
+      cut -d'/' -f1
+  )
 
-declare -a values=(
-  "int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27) hashmap={author:Bob;version:1.0;license:MIT}"
-  "int=88 text=world ip=2001:0db8:85a3:0000:0000:8a2e:0370:7334 duration=3600 point=(-0.3,4.1) person=(Alice,30) hashmap={author:Alice;version:2.0;license:GPL}"
-)
-for val in "${values[@]}"; do
-  # Write
-  run_bg_and_wait "client" "${TESTENV[@]}" exec -n writer -- bash -c "
-    RUST_LOG=info $TARGET_DIR/client write $writer_ip \"$val\""
+  val="$value_base hashmap={author:node$i;version:1.0;license:MIT}"
+
+  # Write from node i
+  run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
+    RUST_LOG=info $TARGET_DIR/client write $node_ip \"$val\""
   echo
 
-  # Read from each node
-  for i in $(seq 1 "$NUM_NODES"); do
-    env="node$i"
-    node_ip=$(
-      "${TESTENV[@]}" -n "$env" status |
+  # Read from all nodes
+  for j in $(seq 1 "$NUM_NODES"); do
+    read_env="node$j"
+    read_ip=$(
+      "${TESTENV[@]}" -n "$read_env" status |
         awk '/Iface:/ {print $4}' |
         cut -d'/' -f1
     )
 
-    run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
-      RUST_LOG=info $TARGET_DIR/client read $node_ip"
+    run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$read_env" -- bash -c "
+      RUST_LOG=info $TARGET_DIR/client read $read_ip"
     echo
   done
 done

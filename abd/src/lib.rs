@@ -1,9 +1,6 @@
 use std::process::Command;
 
-use abd_common::{
-    constants::{ABD_IFACE_NODE_PREFIX, ABD_IFACE_WRITER, ABD_WRITER_ID},
-    map_types::NodeInfo,
-};
+use abd_common::{constants::ABD_IFACE_NODE_PREFIX, map_types::NodeInfo};
 use anyhow::Result;
 use aya::maps::{Array, Map};
 use network_interface::NetworkInterface;
@@ -69,9 +66,6 @@ pub fn populate_nodes_map(
     num_nodes: u32,
 ) -> Result<(), anyhow::Error> {
     let mut array_map: Array<_, NodeInfo> = Array::try_from(map)?;
-
-    let info = get_iface_info(interfaces, ABD_IFACE_WRITER)?;
-    array_map.set(ABD_WRITER_ID, info, 0)?;
 
     for i in 1..=num_nodes {
         let iface_name = format!("{ABD_IFACE_NODE_PREFIX}{i}");

@@ -6,7 +6,8 @@ use std::{
 
 use abd_common::{
     constants::ABD_UDP_PORT,
-    message::{AbdMessage, AbdMessageData, AbdMessageType, ArchivedAbdMessage},
+    message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
+    tag,
 };
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
@@ -31,9 +32,9 @@ enum Command {
 
 #[derive(Args, Debug)]
 struct CommonOpts {
-    /// IPv4 address of the target server
+    /// IPv4 address of the target node
     #[arg()]
-    server: Ipv4Addr,
+    node: Ipv4Addr,
 
     /// Sender ID (0 = writer)
     #[arg(short = 's', long)]
@@ -46,10 +47,6 @@ struct CommonOpts {
     /// Tag value
     #[arg(short = 't', long)]
     tag: Option<u64>,
-
-    /// Use internal server port instead of node port
-    #[arg(long)]
-    server_mode: bool,
 }
 
 #[derive(Args, Debug)]
@@ -79,18 +76,26 @@ fn main() -> anyhow::Result<()> {
         Command::Read(_) => AbdMessageType::ReadAck,
     };
 
-    let (server_addr, msg, label) = match cli.command {
+    let (node_addr, msg, label) = match cli.command {
         Command::Write(opts) => {
-            let server = opts.common.server;
+            let node = opts.common.node;
             let sender_id = opts.common.sender_id.unwrap_or(0);
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
-            let msg = AbdMessage::new(counter, sender_id, tag, AbdMessageType::Write, opts.data);
+            let msg = AbdMessage::new(
+                counter,
+                opts.data,
+                AbdRole::Writer,
+                sender_id,
+                AbdRole::Client,
+                tag,
+                AbdMessageType::Write,
+            );
             let mut label = format!("WRITE({})", opts.data);
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag={tag}");
+                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
@@ -99,31 +104,28 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            let port = if opts.common.server_mode {
-                abd_common::constants::ABD_SERVER_UDP_PORT
-            } else {
-                ABD_UDP_PORT
-            };
-            (SocketAddrV4::new(server, port), msg, label)
+            (SocketAddrV4::new(node, ABD_UDP_PORT), msg, label)
         }
 
         Command::Read(opts) => {
-            let server = opts.common.server;
+            let node = opts.common.node;
             let sender_id = opts.common.sender_id.unwrap_or_default();
             let counter = opts.common.counter.unwrap_or_default();
             let tag = opts.common.tag.unwrap_or_default();
 
             let msg = AbdMessage::new(
                 counter,
+                AbdMessageData::default(),
+                AbdRole::Reader,
                 sender_id,
+                AbdRole::Client,
                 tag,
                 AbdMessageType::Read,
-                AbdMessageData::default(),
             );
             let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag={tag}");
+                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
@@ -132,12 +134,7 @@ fn main() -> anyhow::Result<()> {
                 let _ = write!(label, " sender={sender_id}");
             }
 
-            let port = if opts.common.server_mode {
-                abd_common::constants::ABD_SERVER_UDP_PORT
-            } else {
-                ABD_UDP_PORT
-            };
-            (SocketAddrV4::new(server, port), msg, label)
+            (SocketAddrV4::new(node, ABD_UDP_PORT), msg, label)
         }
     };
 
@@ -145,10 +142,10 @@ fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("serialise ABD message: {e}"))?;
 
     let sock = UdpSocket::bind("0.0.0.0:0")?;
-    info!("{label} -> {server_addr}");
+    info!("{label} -> {node_addr}");
 
     let start = Instant::now();
-    sock.send_to(&payload, server_addr)?;
+    sock.send_to(&payload, node_addr)?;
     debug!("Sent {} bytes", payload.len());
 
     let mut buf = vec![0u8; 65_535].into_boxed_slice();
@@ -173,27 +170,34 @@ fn report(resp: &AbdMessage, elapsed: Duration, expected: AbdMessageType) {
                 AbdMessageType::ReadAck => {
                     info!(
                         "R-ACK({}) from @{}, took={elapsed:?}",
-                        resp.data, resp.sender
+                        resp.data, resp.sender_id
                     );
                 }
                 AbdMessageType::WriteAck => {
-                    info!("W-ACK from @{}, took={elapsed:?}", resp.sender);
+                    info!("W-ACK from @{}, took={elapsed:?}", resp.sender_id);
                 }
                 _ => {}
             }
             debug!(
-                "sender={} tag={} value={:?} counter={}",
-                resp.sender, resp.tag, resp.data, resp.counter
+                "sender={} tag=<{},{}> value={:?} counter={}",
+                resp.sender_id,
+                tag::seq(resp.tag),
+                tag::wid(resp.tag),
+                resp.data,
+                resp.counter
             );
         }
         Ok(unexpected) => {
             warn!(
                 "Unexpected message type: {unexpected:?} (expected {expected:?}) from @{}",
-                resp.sender
+                resp.sender_id
             );
         }
         Err(()) => {
-            warn!("Unknown message type: {} from @{}", resp.type_, resp.sender);
+            warn!(
+                "Unknown message type: {} from @{}",
+                resp.type_, resp.sender_id
+            );
         }
     }
 }

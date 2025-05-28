@@ -11,3 +11,4 @@ extern crate std;
 pub mod constants;
 pub mod map_types;
 pub mod message;
+pub mod tag;

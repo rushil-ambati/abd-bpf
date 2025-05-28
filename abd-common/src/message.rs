@@ -14,42 +14,52 @@ use crate::constants::ABD_MAGIC;
 pub struct AbdMessage {
     /// Counter for versioning or ordering.
     pub counter: u64,
+    /// Data associated with the message.
+    pub data: AbdMessageData,
     /// Magic number for message validation.
     pub magic: u32,
+    /// The role of the intended recipient.
+    pub recipient_role: u32,
     /// Sender node identifier.
-    pub sender: u32,
+    pub sender_id: u32,
+    /// Sender role
+    pub sender_role: u32,
     /// Logical tag for the operation.
     pub tag: u64,
     /// Message type.
     pub type_: u32,
-    /// Data associated with the message.
-    pub data: AbdMessageData,
 }
 impl AbdMessage {
     /// Constructs a new `AbdMessage` with the given parameters.
     ///
     /// # Arguments
     ///
-    /// * `sender` - The sender node's identifier.
-    /// * `ty` - The type of ABD message.
-    /// * `tag` - The logical tag for the operation.
-    /// * `data` - The data associated with the operation.
     /// * `counter` - The version or ordering counter.
+    /// * `data` - The data associated with the operation.
+    /// * `recipient_role` - The role of the intended recipient in the ABD protocol.
+    /// * `sender_id` - The sender node's identifier.
+    /// * `sender_role` - The role of the sender in the ABD protocol.
+    /// * `tag` - The logical tag for the operation.
+    /// * `type_` - The type of ABD message.
     #[must_use]
     pub fn new(
         counter: u64,
-        sender: u32,
+        data: AbdMessageData,
+        recipient_role: AbdRole,
+        sender_id: u32,
+        sender_role: AbdRole,
         tag: u64,
         type_: AbdMessageType,
-        data: AbdMessageData,
     ) -> Self {
         Self {
             counter,
+            data,
             magic: ABD_MAGIC,
-            sender,
+            recipient_role: recipient_role.into(),
+            sender_id,
+            sender_role: sender_role.into(),
             tag,
             type_: type_.into(),
-            data,
         }
     }
 }
@@ -106,6 +116,59 @@ impl TryFrom<u32> for AbdMessageType {
     /// Attempts to convert a `u32` to an `AbdMsgType`.
     ///
     /// Returns `Ok(AbdMsgType)` if the value matches a known message type,
+    /// or `Err(())` otherwise.
+    #[inline(always)]
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        Self::from_u32(value).ok_or(())
+    }
+}
+
+/// Enum representing the role of an actor in the ABD protocol.
+///
+/// We don't use rkyv here because we want to use the enum as a u32 (so we can `bpf_csum_diff` on it)
+/// See <https://github.com/rkyv/rkyv/issues/482#issuecomment-2351618161>
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum AbdRole {
+    Client = 0,
+    Reader = 1,
+    Writer = 2,
+    Server = 3,
+}
+impl AbdRole {
+    /// Converts a `u32` value to an `AbdRole` if possible.
+    ///
+    /// Returns `Some(AbdRole)` if the value matches a known role,
+    /// or `None` otherwise.
+    const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Client),
+            1 => Some(Self::Reader),
+            2 => Some(Self::Writer),
+            3 => Some(Self::Server),
+            _ => None,
+        }
+    }
+}
+impl From<AbdRole> for u32 {
+    /// Converts an `AbdRole` to its corresponding `u32` representation.
+    #[inline(always)]
+    fn from(val: AbdRole) -> Self {
+        val as Self
+    }
+}
+impl From<AbdRole> for u32_le {
+    /// Converts an `AbdRole` to its little-endian `u32_le` representation.
+    #[inline(always)]
+    fn from(val: AbdRole) -> Self {
+        (val as u32).into()
+    }
+}
+impl TryFrom<u32> for AbdRole {
+    type Error = ();
+
+    /// Attempts to convert a `u32` to an `AbdRole`.
+    ///
+    /// Returns `Ok(AbdRole)` if the value matches a known role,
     /// or `Err(())` otherwise.
     #[inline(always)]
     fn try_from(value: u32) -> Result<Self, Self::Error> {
