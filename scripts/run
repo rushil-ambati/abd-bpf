@@ -122,11 +122,9 @@ done
 
 # Bring up each node
 for i in $(seq 1 "$NUM_NODES"); do
-  env="node$i"
-
   run_bg --no-tail "node$i" sudo -E bash -c \
     "RUST_LOG=info $TARGET_DIR/abd-ebpf \
-     --iface $env --num-nodes=$NUM_NODES --node-id $i"
+      --node-id $i --num-nodes=$NUM_NODES"
 done
 
 # Wait for nodes to be ready

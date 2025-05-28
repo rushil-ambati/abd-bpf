@@ -1,4 +1,5 @@
 use abd::populate_nodes_map;
+use abd_common::constants::ABD_IFACE_NODE_PREFIX;
 use anyhow::Context;
 use aya::{
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
@@ -13,10 +14,6 @@ use tokio::signal;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Network interface to attach to
-    #[arg(long, default_value = "eth0")]
-    iface: String,
-
     /// Total number of replicas
     #[arg(long)]
     num_nodes: u32,
@@ -28,17 +25,14 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let Args {
-        iface,
-        num_nodes,
-        node_id,
-    } = Args::parse();
+    let Args { num_nodes, node_id } = Args::parse();
 
     if node_id == 0 || node_id > num_nodes {
         return Err(anyhow::anyhow!(
             "node_id must be between 1 and num_nodes (inclusive)"
         ));
     }
+    let iface = format!("{ABD_IFACE_NODE_PREFIX}{node_id}");
 
     env_logger::builder().format_timestamp(None).init();
 
