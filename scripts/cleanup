@@ -24,7 +24,7 @@ sudo -v || {
 
 # always kill any leftover processes in target/release or target/debug
 for dir in target/release target/debug; do
-  for proc in client abd-tc abd-xdp xdp-pass; do
+  for proc in client abd-ebpf xdp-pass; do
     sudo -n pkill -f "$dir/$proc" || true
   done
 done

@@ -115,7 +115,7 @@ for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/'); do
   "${TESTENV[@]}" exec -n "$env" -- \
     bash -c "ethtool -K veth0 tx-checksum-ip-generic off >/dev/null 2>&1 || true"
 
-  # Attach xdp-pass with warn-level logs
+  # For redirect/transmit to work, there must be an XDP program attached to all veth peers
   run_bg --no-tail "xdp_pass_$env" "${TESTENV[@]}" exec -n "$env" -- \
     bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
 done
@@ -124,17 +124,13 @@ done
 for i in $(seq 1 "$NUM_NODES"); do
   env="node$i"
 
-  run_bg --no-tail node"$i"_xdp sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/abd-xdp \
-     --iface $env --num-nodes=$NUM_NODES --node-id $i"
-
-  run_bg --no-tail node"$i"_tc sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/abd-tc \
+  run_bg --no-tail "node$i" sudo -E bash -c \
+    "RUST_LOG=info $TARGET_DIR/abd-ebpf \
      --iface $env --num-nodes=$NUM_NODES --node-id $i"
 done
 
-# Wait for services to initialize
-sleep 1
+# Wait for nodes to be ready
+sleep 0.5
 echo
 
 # value_base="int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27)"

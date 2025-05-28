@@ -104,7 +104,7 @@ fn handle_read(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Resul
     let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "READ from @{}", sender_id);
+    info!(ctx, "server: READ from @{}", sender_id);
 
     update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 
@@ -124,7 +124,7 @@ fn handle_write(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Resu
     let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "WRITE from @{}", sender_id);
+    info!(ctx, "server: WRITE from @{}", sender_id);
 
     update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 
