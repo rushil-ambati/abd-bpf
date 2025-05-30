@@ -1,15 +1,23 @@
 //! abd/src/bin/abd_userspace.rs
-//! -------------------------------------------------------------------------
-//! High-performance userspace ABD node.
-//!   • One SO_REUSEPORT socket per CPU core
-//!   • Each worker parses and immediately tokio::spawn's the packet handler
-//! -------------------------------------------------------------------------
+//! ---------------------------------------------------------------------------
+//! Userspace ABD replica.
+//!
+//!  • one `SO_REUSEPORT` UDP socket per physical core
+//!  • lock–free receive loop dispatches to   Server / Reader / Writer
+//!  • “busy ⇒ drop” semantics, identical to the eBPF implementation
+//!
+//! Feature flags
+//! -------------
+//! • *default* (single-writer) – node 1 is the sole writer; all other nodes
+//!   proxy client WRITEs to it and forward the resulting ACK.
+//! • *multi-writer* – every node may issue writes.
+//! ---------------------------------------------------------------------------
 
 use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering::*},
         Arc,
     },
 };
@@ -20,176 +28,177 @@ use abd_common::{
     message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
     tag::{self, AbdTag},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use clap::Parser;
 use env_logger::Env;
-use log::{info, warn};
+use log::{debug, error, info, warn};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
-use rkyv::{
-    access, deserialize,
-    rancor::{self, Error as RkyvError},
-};
+use rkyv::{access, deserialize, rancor::Error as RkyvError};
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, RwLock},
     task::JoinSet,
 };
 
-pub fn new_udp_reuseport(local_addr: SocketAddr) -> Result<UdpSocket> {
-    let udp_sock = socket2::Socket::new(
-        if local_addr.is_ipv4() {
-            socket2::Domain::IPV4
-        } else {
-            socket2::Domain::IPV6
-        },
-        socket2::Type::DGRAM,
-        None,
-    )
-    .context("failed to create socket")?;
-    udp_sock
-        .set_reuse_port(true)
-        .context("failed to set SO_REUSEPORT")?;
-    // from tokio-rs/mio/blob/master/src/sys/unix/net.rs
-    udp_sock
-        .set_cloexec(true)
-        .context("failed to set CLOEXEC")?;
-    udp_sock
-        .set_nonblocking(true)
-        .context("failed to set non-blocking")?;
-    udp_sock
-        .bind(&socket2::SockAddr::from(local_addr))
-        .context("failed to bind socket")?;
-    let udp_sock: std::net::UdpSocket = udp_sock.into();
-    let tokio_udp_sock = UdpSocket::from_std(udp_sock)
-        .context("failed to convert std::net::UdpSocket to tokio::net::UdpSocket")?;
-    Ok(tokio_udp_sock)
+/// Majority helper.
+#[inline(always)]
+const fn majority(n: u32) -> u32 {
+    (n >> 1) + 1
 }
 
-#[derive(Default)]
-pub struct TaggedData {
-    pub tag: AbdTag,
-    pub data: AbdMessageData,
+// ────────────────────────────────────────────────────────────────────────────
+// Socket helpers
+// ────────────────────────────────────────────────────────────────────────────
+
+fn new_reuseport_socket(local: SocketAddr) -> Result<UdpSocket> {
+    use socket2::{Domain, Socket, Type};
+
+    let domain = if local.is_ipv4() {
+        Domain::IPV4
+    } else {
+        Domain::IPV6
+    };
+    let sock = Socket::new(domain, Type::DGRAM, None)?;
+    sock.set_reuse_port(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&local.into())?;
+
+    Ok(UdpSocket::from_std(sock.into())?)
 }
 
-/// Replica-server state (one per node)
+// ────────────────────────────────────────────────────────────────────────────
+// Shared data structures
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Default, Clone, Copy)]
+struct TagAndData {
+    tag: AbdTag,
+    data: AbdMessageData,
+}
+
+/// Per-node replica store (Server role).
 #[derive(Default)]
-struct ServerState {
-    /// (<role,node>) ▷ last observed counter
+struct ReplicaStore {
     counters: RwLock<HashMap<(AbdRole, u32), u64>>,
-    /// Stored ⟨tag, data⟩ pair
-    storage: Mutex<TaggedData>,
+    value: Mutex<TagAndData>,
 }
 
-// --------------  READER  ---------------------------------------------------
+/// Reader state-machine.
 #[derive(Default)]
-struct ReaderState {
-    status: AtomicU32,  // 0 idle │ 1 query │ 2 propagate
-    counter: AtomicU64, // local op-counter
-    ack_count: AtomicU32,
-    max: Mutex<TaggedData>, // ⟨largest-tag, data⟩ seen in phase-1
+struct Reader {
+    phase: AtomicU32,   // 0 idle │ 1 query │ 2 propagate
+    counter: AtomicU64, // local monotonic counter
+    acks: AtomicU32,
+    aggregate: Mutex<TagAndData>, // max(tag) & data from phase-1
     client: Mutex<Option<SocketAddr>>,
 }
 
-// --------------  WRITER  ---------------------------------------------------
+/// Writer state-machine.
 #[derive(Default)]
-struct WriterState {
-    status: AtomicU32, // 0 idle │ 1 query │ 2 propagate
+struct Writer {
+    phase: AtomicU32, // 0 idle │ 1 query | 2 propagate │ 3 proxy-wait (single-writer)
     counter: AtomicU64,
-    ack_count: AtomicU32,
-    buf: Mutex<TaggedData>, // (multi-writer) data kept between phases
-    client: Mutex<Option<SocketAddr>>,
+    acks: AtomicU32,
+    buffer: Mutex<TagAndData>,         // carried between phases
+    client: Mutex<Option<SocketAddr>>, // also used for proxy slot
 }
 
 #[derive(Default)]
 struct NodeState {
-    server: ServerState,
-    reader: ReaderState,
-    writer: WriterState,
+    server: ReplicaStore,
+    reader: Reader,
+    writer: Writer,
 }
 
-/// Everything a handler needs
+/// Lightweight context cloned into every async task / handler.
 #[derive(Clone)]
 struct Ctx {
     id: u32,
-    num_nodes: u32,
-    peers: Arc<Vec<SocketAddr>>,
+    replicas: u32,
+    peers: Arc<Vec<SocketAddr>>, // index == node_id-1
     sock: Arc<UdpSocket>,
     state: Arc<NodeState>,
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// CLI
+// ────────────────────────────────────────────────────────────────────────────
+
 #[derive(Parser, Debug)]
-struct Args {
-    /// This node’s ID (1 ≤ id ≤ N)
+struct Cli {
+    /// This node’s identifier (1‥=N).
     #[arg(long)]
     node_id: u32,
-    /// Total number of replicas
+
+    /// Total number of replicas.
     #[arg(long)]
     num_nodes: u32,
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// main
+// ────────────────────────────────────────────────────────────────────────────
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-    let Args { node_id, num_nodes } = Args::parse();
+    let Cli { node_id, num_nodes } = Cli::parse();
 
     if !(1..=num_nodes).contains(&node_id) {
-        bail!("--node-id must be in 1..=num_nodes");
+        bail!("--node-id must be in 1‥={num_nodes}");
     }
 
-    // --- build *read-only* peer list --------------------------------------
+    // Resolve every node’s IPv4 address (host view).
     let ifaces = NetworkInterface::show()?;
     let peers: Vec<_> = (1..=num_nodes)
-        .map(|n| {
-            SocketAddr::from((
-                get_iface_info(&ifaces, &format!("{ABD_IFACE_NODE_PREFIX}{n}"))
-                    .unwrap()
-                    .ipv4,
-                ABD_UDP_PORT,
-            ))
+        .map(|id| {
+            let ip = get_iface_info(&ifaces, &format!("{ABD_IFACE_NODE_PREFIX}{id}"))?.ipv4;
+            Ok(SocketAddr::from((ip, ABD_UDP_PORT)))
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
-    // get my address from the list
-    let bind_addr = peers
-        .get((node_id - 1) as usize)
-        .context("my address not found in peers list")?
-        .clone();
-
-    // --- spin one worker per physical core --------------------------------
-    let state = Arc::<NodeState>::default();
+    let bind_addr = peers[(node_id - 1) as usize];
     let peers = Arc::new(peers);
-    let mut workers = JoinSet::new();
+    let state = Arc::<NodeState>::default();
 
-    for _core in 0..num_cpus::get() {
+    // Spawn one worker per physical core.
+    let mut workers = JoinSet::new();
+    for core in 0..num_cpus::get() {
         let ctx = Ctx {
             id: node_id,
-            num_nodes,
+            replicas: num_nodes,
             peers: peers.clone(),
-            sock: Arc::new(new_udp_reuseport(bind_addr)?),
+            sock: Arc::new(new_reuseport_socket(bind_addr)?),
             state: state.clone(),
         };
-        workers.spawn(worker(ctx));
+        workers.spawn(async move {
+            if let Err(e) = worker(ctx).await {
+                error!("worker #{core} stopped: {e}");
+            }
+        });
     }
 
-    info!("node {node_id} listening on {bind_addr}");
-
-    // join forever (propagate panics)
-    while let Some(res) = workers.join_next().await {
-        if let Err(e) = res? {
-            bail!("worker error: {e}");
-        }
-    }
+    info!("ABD node {node_id}/{num_nodes} listening on {bind_addr}");
+    while workers.join_next().await.is_some() {}
     Ok(())
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// High-rate receive loop
+// ────────────────────────────────────────────────────────────────────────────
+
 async fn worker(ctx: Ctx) -> Result<()> {
     let mut buf = vec![0u8; 65_536];
+
     loop {
         let (n, peer) = ctx.sock.recv_from(&mut buf).await?;
-        let msg = match parse_msg(&buf[..n]) {
+
+        let msg = match access::<ArchivedAbdMessage, RkyvError>(&buf[..n])
+            .and_then(|arch| deserialize::<AbdMessage, RkyvError>(arch))
+        {
             Ok(m) => m,
-            Err(e) => {
-                warn!("{peer}: {e}");
+            Err(_) => {
+                warn!("{peer}: malformed ABD message");
                 continue;
             }
         };
@@ -198,89 +207,79 @@ async fn worker(ctx: Ctx) -> Result<()> {
             Ok(AbdRole::Server) => handle_server(&ctx, msg, peer).await,
             Ok(AbdRole::Reader) => handle_reader(&ctx, msg, peer).await,
             Ok(AbdRole::Writer) => handle_writer(&ctx, msg, peer).await,
-            _ => warn!("unknown recipient role {}", msg.recipient_role),
+            Ok(AbdRole::Client) => handle_proxy_ack(&ctx, msg).await,
+            _ => warn!("invalid recipient_role {}", msg.recipient_role),
         }
     }
 }
 
-async fn handle_server(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
-    use AbdMessageType::*;
+// ────────────────────────────────────────────────────────────────────────────
+// SERVER role
+// ────────────────────────────────────────────────────────────────────────────
 
+async fn handle_server(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
+    match AbdMessageType::try_from(msg.type_) {
+        Ok(AbdMessageType::Read) => srv_on_read(ctx, msg, peer).await,
+        Ok(AbdMessageType::Write) => srv_on_write(ctx, msg, peer).await,
+        _ => warn!("server: unknown type {}", msg.type_),
+    }
+}
+
+async fn srv_on_read(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
     let sender_role = match AbdRole::try_from(msg.sender_role) {
         Ok(r @ (AbdRole::Reader | AbdRole::Writer)) => r,
         _ => return warn!("server: illegal sender_role {}", msg.sender_role),
     };
 
-    match AbdMessageType::try_from(msg.type_) {
-        Ok(Read) => server_read(&ctx, msg, peer, sender_role).await,
-        Ok(Write) => server_write(&ctx, msg, peer, sender_role).await,
-        _ => warn!("server: unexpected msg.type {}", msg.type_),
-    }
-}
-
-async fn server_read(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr, sender_role: AbdRole) {
-    let sender_id = msg.sender_id;
-    info!("Server@{}  READ  from {} ({sender_role:?})", ctx.id, peer);
-
-    // --- (1) counter freshness check --------------------------------------
+    // freshness check
     {
-        let mut map = ctx.state.server.counters.write().await;
-        let entry = map.entry((sender_role, sender_id)).or_default();
-        if msg.counter <= *entry {
-            warn!("Server: stale counter {:?} ≤ {:?}", msg.counter, *entry);
+        let mut c = ctx.state.server.counters.write().await;
+        let ent = c.entry((sender_role, msg.sender_id)).or_default();
+        if msg.counter <= *ent {
             return;
         }
-        *entry = msg.counter;
+        *ent = msg.counter;
     }
 
-    // --- (2) build ReadAck -------------------------------------------------
-    let store = ctx.state.server.storage.lock().await;
-    info!(
-        "Server@{}  ReadAck: tag={} data={}",
-        ctx.id, store.tag, store.data
-    );
+    let val = ctx.state.server.value.lock().await;
     let reply = AbdMessage::new(
         msg.counter,
-        store.data,
-        sender_role, // back to original actor
+        val.data,
+        sender_role,
         ctx.id,
         AbdRole::Server,
-        store.tag,
+        val.tag,
         AbdMessageType::ReadAck,
     );
-    drop(store); // release lock before sending
-
-    if let Err(e) = send(&ctx.sock, &reply, peer).await {
-        warn!("Server: send ReadAck -> {peer} failed: {e:?}");
-    }
+    drop(val); // unlock
+    debug!("server: READ-ACK → {peer}");
+    let _ = send(&ctx.sock, &reply, peer).await;
 }
 
-async fn server_write(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr, sender_role: AbdRole) {
-    let sender_id = msg.sender_id;
-    info!("Server@{}  WRITE from {} ({sender_role:?})", ctx.id, peer);
+async fn srv_on_write(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
+    let sender_role = match AbdRole::try_from(msg.sender_role) {
+        Ok(r @ (AbdRole::Reader | AbdRole::Writer)) => r,
+        _ => return warn!("server: illegal sender_role {}", msg.sender_role),
+    };
 
-    // (1) counter check
     {
-        let mut map = ctx.state.server.counters.write().await;
-        let entry = map.entry((sender_role, sender_id)).or_default();
-        if msg.counter <= *entry {
-            warn!("Server: stale counter");
+        let mut c = ctx.state.server.counters.write().await;
+        let ent = c.entry((sender_role, msg.sender_id)).or_default();
+        if msg.counter <= *ent {
             return;
         }
-        *entry = msg.counter;
+        *ent = msg.counter;
     }
 
-    // (2) maybe update stored ⟨tag,data⟩
     {
-        let mut store = ctx.state.server.storage.lock().await;
-        if tag::gt(msg.tag, store.tag) {
-            store.tag = msg.tag;
-            store.data = msg.data;
+        let mut v = ctx.state.server.value.lock().await;
+        if tag::gt(msg.tag, v.tag) {
+            v.tag = msg.tag;
+            v.data = msg.data;
         }
     }
 
-    // (3) WriteAck
-    let reply = AbdMessage::new(
+    let ack = AbdMessage::new(
         msg.counter,
         msg.data,
         sender_role,
@@ -289,10 +288,13 @@ async fn server_write(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr, sender_role:
         msg.tag,
         AbdMessageType::WriteAck,
     );
-    if let Err(e) = send(&ctx.sock, &reply, peer).await {
-        warn!("Server: send WriteAck -> {peer} failed: {e:?}");
-    }
+    debug!("server: WRITE-ACK → {peer}");
+    let _ = send(&ctx.sock, &ack, peer).await;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// READER role
+// ────────────────────────────────────────────────────────────────────────────
 
 async fn handle_reader(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
     match (
@@ -300,114 +302,128 @@ async fn handle_reader(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
         AbdMessageType::try_from(msg.type_),
     ) {
         (Ok(AbdRole::Client), Ok(AbdMessageType::Read)) => rdr_start(ctx, msg, peer).await,
-        (Ok(AbdRole::Server), Ok(AbdMessageType::ReadAck)) => rdr_on_readack(ctx, msg).await,
-        (Ok(AbdRole::Server), Ok(AbdMessageType::WriteAck)) => rdr_on_writeack(ctx, msg).await,
+        (Ok(AbdRole::Server), Ok(AbdMessageType::ReadAck)) => rdr_on_read_ack(ctx, msg).await,
+        (Ok(AbdRole::Server), Ok(AbdMessageType::WriteAck)) => rdr_on_write_ack(ctx, msg).await,
         _ => {}
     }
 }
 
-// start Phase-1 (Client → Reader)
-async fn rdr_start(ctx: &Ctx, mut msg: AbdMessage, client: SocketAddr) {
-    let st = &ctx.state.reader;
-
-    if st.status.load(Ordering::Relaxed) != 0 {
-        warn!("reader busy – dropping");
+async fn rdr_start(ctx: &Ctx, mut req: AbdMessage, client: SocketAddr) {
+    let rdr = &ctx.state.reader;
+    if rdr.phase.compare_exchange(0, 1, AcqRel, Acquire).is_err() {
+        warn!("reader busy – client READ dropped");
         return;
     }
-    st.status.store(1, Ordering::Relaxed);
-    st.ack_count.store(0, Ordering::Relaxed);
-    st.counter.fetch_add(1, Ordering::Relaxed);
-    st.max.lock().await.tag = 0;
-    *st.client.lock().await = Some(client);
 
-    // broadcast READ
-    msg.counter = st.counter.load(Ordering::Relaxed);
-    msg.sender_id = ctx.id;
-    msg.sender_role = AbdRole::Reader.into();
-    msg.recipient_role = AbdRole::Server.into();
-    msg.type_ = AbdMessageType::Read.into();
-    msg.tag = 0;
+    rdr.acks.store(0, Relaxed);
+    rdr.counter.fetch_add(1, Relaxed);
+    rdr.aggregate.lock().await.tag = 0;
+    *rdr.client.lock().await = Some(client);
 
-    for &p in ctx.peers.iter() {
-        let _ = send(&ctx.sock, &msg, p).await;
+    req.counter = rdr.counter.load(Relaxed);
+    req.sender_id = ctx.id;
+    req.sender_role = AbdRole::Reader.into();
+    req.recipient_role = AbdRole::Server.into();
+    req.type_ = AbdMessageType::Read.into();
+    req.tag = 0;
+
+    info!("reader: READ from client {client}");
+    for &replica in ctx.peers.iter() {
+        let _ = send(&ctx.sock, &req, replica).await;
     }
 }
 
-// handle R-ACKs during Phase-1
-async fn rdr_on_readack(ctx: &Ctx, ack: AbdMessage) {
-    let st = &ctx.state.reader;
-    if st.status.load(Ordering::Relaxed) != 1 {
+async fn rdr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
+    let rdr = &ctx.state.reader;
+    if rdr.phase.load(Relaxed) != 1 || ack.counter != rdr.counter.load(Relaxed) {
         return;
     }
-    if ack.counter != st.counter.load(Ordering::Relaxed) {
-        return;
-    }
-
-    info!("Reader@{}  READ ACK from {}", ctx.id, ack.sender_id);
 
     {
-        let mut max = st.max.lock().await;
-        if tag::gt(ack.tag, max.tag) {
-            max.tag = ack.tag;
-            max.data = ack.data;
+        let mut agg = rdr.aggregate.lock().await;
+        if tag::gt(ack.tag, agg.tag) {
+            agg.tag = ack.tag;
+            agg.data = ack.data;
         }
     }
-    if st.ack_count.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.num_nodes) {
+    if rdr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+        info!(
+            "reader: got {} READ-ACKs, waiting for majority ({})",
+            rdr.acks.load(Relaxed),
+            majority(ctx.replicas)
+        );
         return;
     }
 
-    // ── phase-2 ───────────────────────────────────────────────────────────
-    st.status.store(2, Ordering::Relaxed);
-    st.ack_count.store(0, Ordering::Relaxed);
-    st.counter.fetch_add(1, Ordering::Relaxed);
+    // phase-2
+    rdr.phase.store(2, Relaxed);
+    rdr.acks.store(0, Relaxed);
+    rdr.counter.fetch_add(1, Relaxed);
 
-    let max = st.max.lock().await;
+    let agg = rdr.aggregate.lock().await;
     let prop = AbdMessage::new(
-        st.counter.load(Ordering::Relaxed),
-        max.data,
+        rdr.counter.load(Relaxed),
+        agg.data,
         AbdRole::Server,
         ctx.id,
         AbdRole::Reader,
-        max.tag,
+        agg.tag,
         AbdMessageType::Write,
     );
-    drop(max);
+    drop(agg);
 
-    for &p in ctx.peers.iter() {
-        let _ = send(&ctx.sock, &prop, p).await;
+    info!(
+        "reader: propagating tag <{},{}>",
+        tag::seq(prop.tag),
+        tag::wid(prop.tag)
+    );
+    for &replica in ctx.peers.iter() {
+        let _ = send(&ctx.sock, &prop, replica).await;
     }
 }
 
-// handle W-ACKs during Phase-2
-async fn rdr_on_writeack(ctx: &Ctx, ack: AbdMessage) {
-    let st = &ctx.state.reader;
-    if st.status.load(Ordering::Relaxed) != 2 {
+async fn rdr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
+    let rdr = &ctx.state.reader;
+    if rdr.phase.load(Relaxed) != 2 || ack.counter != rdr.counter.load(Relaxed) {
         return;
     }
-    if ack.counter != st.counter.load(Ordering::Relaxed) {
-        return;
-    }
-    if st.ack_count.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.num_nodes) {
+    if rdr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
         return;
     }
 
-    // ── done, reply to client ─────────────────────────────────────────────
-    let max = st.max.lock().await;
-    let client = st.client.lock().await.take();
-    st.status.store(0, Ordering::Relaxed); // idle again
+    rdr.phase.store(0, Release);
+    let client = rdr.client.lock().await.take();
+    let agg = rdr.aggregate.lock().await;
 
     if let Some(dst) = client {
         let reply = AbdMessage::new(
             0,
-            max.data,
-            AbdRole::Reader,
-            ctx.id,
+            agg.data,
             AbdRole::Client,
-            max.tag,
+            ctx.id,
+            AbdRole::Reader,
+            agg.tag,
             AbdMessageType::ReadAck,
         );
+        info!("reader: READ-ACK → client {dst}");
         let _ = send(&ctx.sock, &reply, dst).await;
     }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// WRITER role
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(not(feature = "multi-writer"))]
+#[inline(always)]
+fn is_writer(node_id: u32) -> bool {
+    node_id == 1
+}
+
+#[cfg(feature = "multi-writer")]
+#[inline(always)]
+fn is_writer(_: u32) -> bool {
+    true
 }
 
 async fn handle_writer(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
@@ -416,111 +432,115 @@ async fn handle_writer(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
         AbdMessageType::try_from(msg.type_),
     ) {
         (Ok(AbdRole::Client), Ok(AbdMessageType::Write)) => wtr_start(ctx, msg, peer).await,
-        (Ok(AbdRole::Server), Ok(AbdMessageType::ReadAck)) => wtr_on_readack(ctx, msg).await,
-        (Ok(AbdRole::Server), Ok(AbdMessageType::WriteAck)) => wtr_on_writeack(ctx, msg).await,
+        (Ok(AbdRole::Server), Ok(AbdMessageType::ReadAck)) => wtr_on_read_ack(ctx, msg).await,
+        (Ok(AbdRole::Server), Ok(AbdMessageType::WriteAck)) => wtr_on_write_ack(ctx, msg).await,
         _ => {}
     }
 }
 
-#[cfg(not(feature = "multi-writer"))]
-fn is_writer(id: u32) -> bool {
-    id == 1
-}
-#[cfg(feature = "multi-writer")]
-fn is_writer(_: u32) -> bool {
-    true
-}
+async fn wtr_start(ctx: &Ctx, req: AbdMessage, client: SocketAddr) {
+    #[cfg(feature = "multi-writer")]
+    let mut req = req;
 
-async fn wtr_start(ctx: &Ctx, msg: AbdMessage, client: SocketAddr) {
+    let wtr = &ctx.state.writer;
+
+    // -------------------------------------------------- proxy path
     if !is_writer(ctx.id) {
+        if wtr.phase.compare_exchange(0, 3, AcqRel, Acquire).is_err() {
+            warn!("proxy busy – dropping client WRITE");
+            return;
+        }
+        *wtr.client.lock().await = Some(client);
+        info!("proxy: forwarding WRITE from client {client} → writer #1");
+        let _ = send(&ctx.sock, &req, ctx.peers[0]).await;
         return;
     }
-    info!("Writer@{}  WRITE from {}", ctx.id, client);
-    let st = &ctx.state.writer;
-    if st.status.load(Ordering::Relaxed) != 0 {
-        warn!("writer busy");
+    // -------------------------------------------------- true writer
+    if wtr.phase.compare_exchange(0, 1, AcqRel, Acquire).is_err() {
+        warn!("writer busy – client WRITE dropped");
         return;
     }
 
-    st.status.store(1, Ordering::Relaxed);
-    st.ack_count.store(0, Ordering::Relaxed);
-    st.counter.fetch_add(1, Ordering::Relaxed);
-    *st.client.lock().await = Some(client);
+    info!("writer: received WRITE from client {client}");
+
+    wtr.acks.store(0, Relaxed);
+    wtr.counter.fetch_add(1, Relaxed);
+    *wtr.client.lock().await = Some(client);
 
     #[cfg(feature = "multi-writer")]
     {
-        // phase-1 query identical to Reader
-        msg.counter = st.counter.load(Ordering::Relaxed);
-        msg.sender_id = ctx.id;
-        msg.sender_role = AbdRole::Writer.into();
-        msg.recipient_role = AbdRole::Server.into();
-        msg.type_ = AbdMessageType::Read.into();
-        msg.tag = 0;
+        // phase-1 query
+        req.counter = wtr.counter.load(Relaxed);
+        req.sender_id = ctx.id;
+        req.sender_role = AbdRole::Writer.into();
+        req.recipient_role = AbdRole::Server.into();
+        req.type_ = AbdMessageType::Read.into();
+        req.tag = 0;
 
-        for &p in ctx.peers.iter() {
-            let _ = send(&ctx.sock, &msg, p).await;
+        {
+            let mut buf = wtr.buffer.lock().await;
+            buf.data = req.data;
+            buf.tag = 0;
+        }
+
+        for &replica in ctx.peers.iter() {
+            let _ = send(&ctx.sock, &req, replica).await;
         }
     }
 
     #[cfg(not(feature = "multi-writer"))]
     {
-        // single-writer: skip query, go straight to propagation
-        let tag = {
-            let mut buf = st.buf.lock().await;
+        // choose next tag locally
+        let next_tag = {
+            let mut buf = wtr.buffer.lock().await;
             buf.tag = tag::pack(tag::seq(buf.tag) + 1, 0);
             buf.tag
         };
-        propagate(ctx, st, msg.data, tag).await;
-    }
-
-    #[cfg(feature = "multi-writer")]
-    {
-        // stash the data until phase-2
-        let mut buf = st.buf.lock().await;
-        buf.data = msg.data;
+        propagate_write(ctx, wtr, req.data, next_tag).await;
     }
 }
 
-async fn wtr_on_readack(ctx: &Ctx, ack: AbdMessage) {
-    #[cfg(not(feature = "multi-writer"))]
-    {
-        return;
-    } // never happens
-    let st = &ctx.state.writer;
-    if st.status.load(Ordering::Relaxed) != 1 {
-        return;
-    }
-    if st.counter.load(Ordering::Relaxed) != ack.counter {
+#[cfg(feature = "multi-writer")]
+async fn wtr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
+    let wtr = &ctx.state.writer;
+    if wtr.phase.load(Relaxed) != 1 || ack.counter != wtr.counter.load(Relaxed) {
         return;
     }
 
     {
-        let mut buf = st.buf.lock().await;
+        let mut buf = wtr.buffer.lock().await;
         if tag::gt(ack.tag, buf.tag) {
             buf.tag = ack.tag;
         }
     }
-    if st.ack_count.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.num_nodes) {
+    if wtr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+        info!(
+            "writer: got {} READ-ACKs, waiting for majority ({})",
+            wtr.acks.load(Relaxed),
+            majority(ctx.replicas)
+        );
         return;
     }
 
-    // build new tag (> any seen)
-    let tag = {
-        let mut buf = st.buf.lock().await;
+    let (tag, data) = {
+        let mut buf = wtr.buffer.lock().await;
         buf.tag = tag::pack(tag::seq(buf.tag) + 1, ctx.id);
-        buf.tag
+        (buf.tag, buf.data)
     };
-    let data = st.buf.lock().await.data;
-    propagate(ctx, st, data, tag).await;
+    propagate_write(ctx, wtr, data, tag).await;
 }
 
-async fn propagate(ctx: &Ctx, st: &WriterState, data: AbdMessageData, tag: AbdTag) {
-    st.status.store(2, Ordering::Relaxed);
-    st.ack_count.store(0, Ordering::Relaxed);
-    st.counter.fetch_add(1, Ordering::Relaxed);
+#[cfg(not(feature = "multi-writer"))]
+async fn wtr_on_read_ack(_: &Ctx, _: AbdMessage) { /* never called */
+}
 
-    let msg = AbdMessage::new(
-        st.counter.load(Ordering::Relaxed),
+async fn propagate_write(ctx: &Ctx, wtr: &Writer, data: AbdMessageData, tag: AbdTag) {
+    wtr.phase.store(2, Relaxed);
+    wtr.acks.store(0, Relaxed);
+    wtr.counter.fetch_add(1, Relaxed);
+
+    let prop = AbdMessage::new(
+        wtr.counter.load(Relaxed),
         data,
         AbdRole::Server,
         ctx.id,
@@ -528,57 +548,87 @@ async fn propagate(ctx: &Ctx, st: &WriterState, data: AbdMessageData, tag: AbdTa
         tag,
         AbdMessageType::Write,
     );
-    for &p in ctx.peers.iter() {
-        info!("Writer@{}  propagating WRITE to {}", ctx.id, p);
-        let _ = send(&ctx.sock, &msg, p).await;
+
+    info!(
+        "writer: propagating tag <{},{}>",
+        tag::seq(tag),
+        tag::wid(tag)
+    );
+    for &replica in ctx.peers.iter() {
+        let _ = send(&ctx.sock, &prop, replica).await;
     }
 }
 
-async fn wtr_on_writeack(ctx: &Ctx, ack: AbdMessage) {
-    info!("Writer@{}  WRITE ACK from {}", ctx.id, ack.sender_id);
-
-    let st = &ctx.state.writer;
-    if st.status.load(Ordering::Relaxed) != 2 {
+async fn wtr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
+    let wtr = &ctx.state.writer;
+    if wtr.phase.load(Relaxed) != 2 || ack.counter != wtr.counter.load(Relaxed) {
         return;
     }
-    if ack.counter != st.counter.load(Ordering::Relaxed) {
-        return;
-    }
-    if st.ack_count.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.num_nodes) {
+    if wtr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
         return;
     }
 
-    st.status.store(0, Ordering::Relaxed); // idle
-    let tag = {
-        let buf = st.buf.lock().await;
-        buf.tag
-    };
-    if let Some(dst) = st.client.lock().await.take() {
+    wtr.phase.store(0, Release);
+    let tag = wtr.buffer.lock().await.tag;
+    if let Some(client) = wtr.client.lock().await.take() {
         let reply = AbdMessage::new(
             0,
             ack.data,
-            AbdRole::Writer,
-            ctx.id,
             AbdRole::Client,
+            ctx.id,
+            AbdRole::Writer,
             tag,
             AbdMessageType::WriteAck,
         );
-        let _ = send(&ctx.sock, &reply, dst).await;
+        info!("writer: WRITE-ACK → client {client}");
+        let _ = send(&ctx.sock, &reply, client).await;
     }
 }
 
-fn parse_msg(pkt: &[u8]) -> Result<AbdMessage, &'static str> {
-    let a = access::<ArchivedAbdMessage, RkyvError>(pkt).map_err(|_| "rkyv")?;
-    deserialize::<AbdMessage, rancor::Error>(a).map_err(|_| "deserialize")
+// ────────────────────────────────────────────────────────────────────────────
+// PROXY ACK handling  (single-writer mode)
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn handle_proxy_ack(ctx: &Ctx, msg: AbdMessage) {
+    if is_writer(ctx.id) {
+        return;
+    } // writers never proxy
+    if msg.type_ != AbdMessageType::WriteAck as u32 {
+        return;
+    }
+
+    info!("proxy: received WRITE-ACK from writer #1");
+
+    let wtr = &ctx.state.writer;
+    if wtr.phase.load(Relaxed) != 3 {
+        return;
+    }
+
+    let client = match wtr.client.lock().await.take() {
+        Some(c) => c,
+        None => return,
+    };
+    wtr.phase.store(0, Release);
+
+    let ack = AbdMessage::new(
+        0,
+        msg.data,
+        AbdRole::Writer,
+        msg.sender_id,
+        AbdRole::Client,
+        msg.tag,
+        AbdMessageType::WriteAck,
+    );
+    info!("proxy: WRITE-ACK → client {client}");
+    let _ = send(&ctx.sock, &ack, client).await;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Serialization helpers
+// ────────────────────────────────────────────────────────────────────────────
 
 async fn send(sock: &UdpSocket, msg: &AbdMessage, peer: SocketAddr) -> Result<()> {
     let bytes = rkyv::to_bytes::<RkyvError>(msg)?;
     sock.send_to(&bytes, peer).await?;
     Ok(())
-}
-
-#[inline]
-fn majority(n: u32) -> u32 {
-    (n >> 1) + 1
 }
