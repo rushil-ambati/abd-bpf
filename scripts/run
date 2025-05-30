@@ -122,13 +122,17 @@ done
 
 # Bring up each node
 for i in $(seq 1 "$NUM_NODES"); do
+  # run_bg --no-tail "node$i" sudo -E bash -c \
+  #   "RUST_LOG=info $TARGET_DIR/abd-ebpf \
+  #     --node-id $i --num-nodes=$NUM_NODES"
+
   run_bg --no-tail "node$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/abd-ebpf \
+    "RUST_LOG=info $TARGET_DIR/abd-userspace \
       --node-id $i --num-nodes=$NUM_NODES"
 done
 
 # Wait for nodes to be ready
-sleep 0.5
+sleep 1
 echo
 
 # value_base="int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27)"
@@ -144,23 +148,31 @@ for i in $(seq 1 "$NUM_NODES"); do
   val="$value_base hashmap={author:node$i;version:1.0;license:MIT}"
 
   # Write from node i
-  run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
-    RUST_LOG=info $TARGET_DIR/client write $node_ip \"$val\""
+  # run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$env" -- bash -c "
+  #   RUST_LOG=info $TARGET_DIR/client write $node_ip \"$val\""
+  # echo
+
+  run_bg_and_wait "client" bash -c "RUST_LOG=info $TARGET_DIR/client write $node_ip \"$val\""
+  # run_bg_and_wait "client" bash -c "RUST_LOG=info $TARGET_DIR/client write $node_ip \"$val\" --server --sender-id 1 --counter 1 --tag 1"
   echo
 
-  # Read from all nodes
-  for j in $(seq 1 "$NUM_NODES"); do
-    read_env="node$j"
-    read_ip=$(
-      "${TESTENV[@]}" -n "$read_env" status |
-        awk '/Iface:/ {print $4}' |
-        cut -d'/' -f1
-    )
+  # run_bg_and_wait "client" bash -c "RUST_LOG=info $TARGET_DIR/client read $node_ip --server --sender-id 1 --counter 2"
+  run_bg_and_wait "client" bash -c "RUST_LOG=info $TARGET_DIR/client read $node_ip"
+  # echo
 
-    run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$read_env" -- bash -c "
-      RUST_LOG=info $TARGET_DIR/client read $read_ip"
-    echo
-  done
+  # # Read from all nodes
+  # for j in $(seq 1 "$NUM_NODES"); do
+  #   read_env="node$j"
+  #   read_ip=$(
+  #     "${TESTENV[@]}" -n "$read_env" status |
+  #       awk '/Iface:/ {print $4}' |
+  #       cut -d'/' -f1
+  #   )
+
+  #   run_bg_and_wait "client" "${TESTENV[@]}" exec -n "$read_env" -- bash -c "
+  #     RUST_LOG=info $TARGET_DIR/client read $read_ip"
+  #   echo
+  # done
 done
 
 # Leave the services running if requested

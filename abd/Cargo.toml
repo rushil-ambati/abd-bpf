@@ -3,6 +3,10 @@ name = "abd"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+multi-writer = []
+
 [dependencies]
 abd-common = { path = "../abd-common", features = ["user"] }
 
@@ -12,17 +16,13 @@ aya-log = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
-tokio = { workspace = true, features = [
-    "macros",
-    "rt",
-    "rt-multi-thread",
-    "net",
-    "signal",
-] }
+netns-rs = { workspace = true }
+network-interface = { workspace = true }
+num_cpus = { workspace = true }
+rkyv = { workspace = true, default-features = true }
+socket2 = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
-
-network-interface = "2.0.1"
-netns-rs = "0.1.0"
 
 [build-dependencies]
 anyhow = { workspace = true }
@@ -32,6 +32,10 @@ abd-ebpf = { path = "../abd-ebpf" }
 [[bin]]
 name = "abd-ebpf"
 path = "src/bin/abd_ebpf.rs"
+
+[[bin]]
+name = "abd-userspace"
+path = "src/bin/abd_userspace.rs"
 
 [[bin]]
 name = "xdp-pass"
