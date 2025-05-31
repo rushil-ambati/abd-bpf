@@ -19,16 +19,31 @@ mkdir -p logs
 rm -f logs/*
 
 # Run command in background, tee its log, optionally stream to stdout
-# Usage: run_bg [--no-tail] <name> <command...>
+# Usage: run_bg [--no-tail] [--no-log] <name> <command...>
 run_bg() {
   local tail=true
-  if [[ "$1" == "--no-tail" ]]; then
-    tail=false
+  local logging=true
+
+  while [[ "$1" == --* ]]; do
+    case "$1" in
+    --no-tail) tail=false ;;
+    --no-log) logging=false ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      exit 1
+      ;;
+    esac
     shift
-  fi
+  done
 
   local name=$1
   shift
+
+  if ! $logging; then
+    "$@" >/dev/null 2>&1 &
+    bg_pids+=($!)
+    return
+  fi
 
   local logfile="logs/${name}.log"
   : >"$logfile"
@@ -116,19 +131,23 @@ for env in $(seq 1 "$NUM_NODES" | sed 's/^/node/'); do
     bash -c "ethtool -K veth0 tx-checksum-ip-generic off >/dev/null 2>&1 || true"
 
   # For redirect/transmit to work, there must be an XDP program attached to all veth peers
-  run_bg --no-tail "xdp_pass_$env" "${TESTENV[@]}" exec -n "$env" -- \
-    bash -c "RUST_LOG=warn $TARGET_DIR/xdp-pass --iface veth0"
+  run_bg --no-log --no-tail "xdp_pass_$env" "${TESTENV[@]}" exec -n "$env" -- \
+    bash -c "RUST_LOG=off $TARGET_DIR/xdp-pass --iface veth0"
 done
 
 # Bring up each node
 for i in $(seq 1 "$NUM_NODES"); do
+  # run_bg --no-tail "node$i" sudo -E bash -c \
+  #   "RUST_LOG=info $TARGET_DIR/abd-ebpf \
+  #     --node-id $i --num-nodes=$NUM_NODES"
+
   run_bg --no-tail "node$i" sudo -E bash -c \
-    "RUST_LOG=info $TARGET_DIR/abd-ebpf \
+    "RUST_LOG=info $TARGET_DIR/abd-userspace \
       --node-id $i --num-nodes=$NUM_NODES"
 done
 
 # Wait for nodes to be ready
-sleep 0.5
+sleep 1
 echo
 
 # value_base="int=42 text=hello ip=192.168.1.100 duration=5 point=(1.5,2.0) char_opt=Z person=(Bob,27)"

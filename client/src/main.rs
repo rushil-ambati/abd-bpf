@@ -47,6 +47,10 @@ struct CommonOpts {
     /// Tag value
     #[arg(short = 't', long)]
     tag: Option<u64>,
+
+    /// Send to server instead of reader/writer
+    #[arg(long, default_value_t = false)]
+    server: bool,
 }
 
 #[derive(Args, Debug)]
@@ -83,12 +87,24 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or(0);
             let tag = opts.common.tag.unwrap_or(0);
 
+            let recipient_role = if opts.common.server {
+                AbdRole::Server
+            } else {
+                AbdRole::Writer
+            };
+
+            let sender_role = if opts.common.server {
+                AbdRole::Writer
+            } else {
+                AbdRole::Client
+            };
+
             let msg = AbdMessage::new(
                 counter,
                 opts.data,
-                AbdRole::Writer,
+                recipient_role,
                 sender_id,
-                AbdRole::Client,
+                sender_role,
                 tag,
                 AbdMessageType::Write,
             );
@@ -113,12 +129,24 @@ fn main() -> anyhow::Result<()> {
             let counter = opts.common.counter.unwrap_or_default();
             let tag = opts.common.tag.unwrap_or_default();
 
+            let recipient_role = if opts.common.server {
+                AbdRole::Server
+            } else {
+                AbdRole::Reader
+            };
+
+            let sender_role = if opts.common.server {
+                AbdRole::Reader
+            } else {
+                AbdRole::Client
+            };
+
             let msg = AbdMessage::new(
                 counter,
                 AbdMessageData::default(),
-                AbdRole::Reader,
+                recipient_role,
                 sender_id,
-                AbdRole::Client,
+                sender_role,
                 tag,
                 AbdMessageType::Read,
             );
