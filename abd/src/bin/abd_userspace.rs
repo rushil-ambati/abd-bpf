@@ -1,4 +1,4 @@
-//! abd/src/bin/abd_userspace.rs
+//! `abd/src/bin/abd_userspace.rs`
 //! ---------------------------------------------------------------------------
 //! Userspace ABD replica.
 //!
@@ -17,7 +17,7 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering::*},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -193,14 +193,11 @@ async fn worker(ctx: Ctx) -> Result<()> {
     loop {
         let (n, peer) = ctx.sock.recv_from(&mut buf).await?;
 
-        let msg = match access::<ArchivedAbdMessage, RkyvError>(&buf[..n])
-            .and_then(|arch| deserialize::<AbdMessage, RkyvError>(arch))
-        {
-            Ok(m) => m,
-            Err(_) => {
-                warn!("{peer}: malformed ABD message");
-                continue;
-            }
+        let Ok(msg) = access::<ArchivedAbdMessage, RkyvError>(&buf[..n])
+            .and_then(deserialize::<AbdMessage, RkyvError>)
+        else {
+            warn!("{peer}: malformed ABD message");
+            continue;
         };
 
         match AbdRole::try_from(msg.recipient_role) {
@@ -226,9 +223,9 @@ async fn handle_server(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
 }
 
 async fn srv_on_read(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
-    let sender_role = match AbdRole::try_from(msg.sender_role) {
-        Ok(r @ (AbdRole::Reader | AbdRole::Writer)) => r,
-        _ => return warn!("server: illegal sender_role {}", msg.sender_role),
+    let Ok(sender_role @ (AbdRole::Reader | AbdRole::Writer)) = AbdRole::try_from(msg.sender_role)
+    else {
+        return warn!("server: illegal sender_role {}", msg.sender_role);
     };
 
     // freshness check
@@ -257,9 +254,9 @@ async fn srv_on_read(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
 }
 
 async fn srv_on_write(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
-    let sender_role = match AbdRole::try_from(msg.sender_role) {
-        Ok(r @ (AbdRole::Reader | AbdRole::Writer)) => r,
-        _ => return warn!("server: illegal sender_role {}", msg.sender_role),
+    let Ok(sender_role @ (AbdRole::Reader | AbdRole::Writer)) = AbdRole::try_from(msg.sender_role)
+    else {
+        return warn!("server: illegal sender_role {}", msg.sender_role);
     };
 
     {
@@ -310,17 +307,21 @@ async fn handle_reader(ctx: &Ctx, msg: AbdMessage, peer: SocketAddr) {
 
 async fn rdr_start(ctx: &Ctx, mut req: AbdMessage, client: SocketAddr) {
     let rdr = &ctx.state.reader;
-    if rdr.phase.compare_exchange(0, 1, AcqRel, Acquire).is_err() {
+    if rdr
+        .phase
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         warn!("reader busy – client READ dropped");
         return;
     }
 
-    rdr.acks.store(0, Relaxed);
-    rdr.counter.fetch_add(1, Relaxed);
+    rdr.acks.store(0, Ordering::Relaxed);
+    rdr.counter.fetch_add(1, Ordering::Relaxed);
     rdr.aggregate.lock().await.tag = 0;
     *rdr.client.lock().await = Some(client);
 
-    req.counter = rdr.counter.load(Relaxed);
+    req.counter = rdr.counter.load(Ordering::Relaxed);
     req.sender_id = ctx.id;
     req.sender_role = AbdRole::Reader.into();
     req.recipient_role = AbdRole::Server.into();
@@ -335,7 +336,8 @@ async fn rdr_start(ctx: &Ctx, mut req: AbdMessage, client: SocketAddr) {
 
 async fn rdr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
     let rdr = &ctx.state.reader;
-    if rdr.phase.load(Relaxed) != 1 || ack.counter != rdr.counter.load(Relaxed) {
+    if rdr.phase.load(Ordering::Relaxed) != 1 || ack.counter != rdr.counter.load(Ordering::Relaxed)
+    {
         return;
     }
 
@@ -346,23 +348,23 @@ async fn rdr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
             agg.data = ack.data;
         }
     }
-    if rdr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+    if rdr.acks.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.replicas) {
         info!(
             "reader: got {} READ-ACKs, waiting for majority ({})",
-            rdr.acks.load(Relaxed),
+            rdr.acks.load(Ordering::Relaxed),
             majority(ctx.replicas)
         );
         return;
     }
 
     // phase-2
-    rdr.phase.store(2, Relaxed);
-    rdr.acks.store(0, Relaxed);
-    rdr.counter.fetch_add(1, Relaxed);
+    rdr.phase.store(2, Ordering::Relaxed);
+    rdr.acks.store(0, Ordering::Relaxed);
+    rdr.counter.fetch_add(1, Ordering::Relaxed);
 
     let agg = rdr.aggregate.lock().await;
     let prop = AbdMessage::new(
-        rdr.counter.load(Relaxed),
+        rdr.counter.load(Ordering::Relaxed),
         agg.data,
         AbdRole::Server,
         ctx.id,
@@ -384,14 +386,15 @@ async fn rdr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
 
 async fn rdr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
     let rdr = &ctx.state.reader;
-    if rdr.phase.load(Relaxed) != 2 || ack.counter != rdr.counter.load(Relaxed) {
+    if rdr.phase.load(Ordering::Relaxed) != 2 || ack.counter != rdr.counter.load(Ordering::Relaxed)
+    {
         return;
     }
-    if rdr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+    if rdr.acks.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.replicas) {
         return;
     }
 
-    rdr.phase.store(0, Release);
+    rdr.phase.store(0, Ordering::Release);
     let client = rdr.client.lock().await.take();
     let agg = rdr.aggregate.lock().await;
 
@@ -405,6 +408,7 @@ async fn rdr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
             agg.tag,
             AbdMessageType::ReadAck,
         );
+        drop(agg); // unlock
         info!("reader: READ-ACK → client {dst}");
         let _ = send(&ctx.sock, &reply, dst).await;
     }
@@ -416,13 +420,13 @@ async fn rdr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
 
 #[cfg(not(feature = "multi-writer"))]
 #[inline(always)]
-fn is_writer(node_id: u32) -> bool {
+const fn is_writer(node_id: u32) -> bool {
     node_id == 1
 }
 
 #[cfg(feature = "multi-writer")]
 #[inline(always)]
-fn is_writer(_: u32) -> bool {
+const fn is_writer(_: u32) -> bool {
     true
 }
 
@@ -446,7 +450,11 @@ async fn wtr_start(ctx: &Ctx, req: AbdMessage, client: SocketAddr) {
 
     // -------------------------------------------------- proxy path
     if !is_writer(ctx.id) {
-        if wtr.phase.compare_exchange(0, 3, AcqRel, Acquire).is_err() {
+        if wtr
+            .phase
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             warn!("proxy busy – dropping client WRITE");
             return;
         }
@@ -456,21 +464,25 @@ async fn wtr_start(ctx: &Ctx, req: AbdMessage, client: SocketAddr) {
         return;
     }
     // -------------------------------------------------- true writer
-    if wtr.phase.compare_exchange(0, 1, AcqRel, Acquire).is_err() {
+    if wtr
+        .phase
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
         warn!("writer busy – client WRITE dropped");
         return;
     }
 
     info!("writer: received WRITE from client {client}");
 
-    wtr.acks.store(0, Relaxed);
-    wtr.counter.fetch_add(1, Relaxed);
+    wtr.acks.store(0, Ordering::Relaxed);
+    wtr.counter.fetch_add(1, Ordering::Relaxed);
     *wtr.client.lock().await = Some(client);
 
     #[cfg(feature = "multi-writer")]
     {
         // phase-1 query
-        req.counter = wtr.counter.load(Relaxed);
+        req.counter = wtr.counter.load(Ordering::Relaxed);
         req.sender_id = ctx.id;
         req.sender_role = AbdRole::Writer.into();
         req.recipient_role = AbdRole::Server.into();
@@ -496,14 +508,15 @@ async fn wtr_start(ctx: &Ctx, req: AbdMessage, client: SocketAddr) {
             buf.tag = tag::pack(tag::seq(buf.tag) + 1, 0);
             buf.tag
         };
-        propagate_write(ctx, wtr, req.data, next_tag).await;
+        propagate_write(ctx, wtr, &req.data, next_tag).await;
     }
 }
 
 #[cfg(feature = "multi-writer")]
 async fn wtr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
     let wtr = &ctx.state.writer;
-    if wtr.phase.load(Relaxed) != 1 || ack.counter != wtr.counter.load(Relaxed) {
+    if wtr.phase.load(Ordering::Relaxed) != 1 || ack.counter != wtr.counter.load(Ordering::Relaxed)
+    {
         return;
     }
 
@@ -513,10 +526,10 @@ async fn wtr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
             buf.tag = ack.tag;
         }
     }
-    if wtr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+    if wtr.acks.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.replicas) {
         info!(
             "writer: got {} READ-ACKs, waiting for majority ({})",
-            wtr.acks.load(Relaxed),
+            wtr.acks.load(Ordering::Relaxed),
             majority(ctx.replicas)
         );
         return;
@@ -527,21 +540,22 @@ async fn wtr_on_read_ack(ctx: &Ctx, ack: AbdMessage) {
         buf.tag = tag::pack(tag::seq(buf.tag) + 1, ctx.id);
         (buf.tag, buf.data)
     };
-    propagate_write(ctx, wtr, data, tag).await;
+    propagate_write(ctx, wtr, &data, tag).await;
 }
 
 #[cfg(not(feature = "multi-writer"))]
+#[allow(clippy::unused_async)]
 async fn wtr_on_read_ack(_: &Ctx, _: AbdMessage) { /* never called */
 }
 
-async fn propagate_write(ctx: &Ctx, wtr: &Writer, data: AbdMessageData, tag: AbdTag) {
-    wtr.phase.store(2, Relaxed);
-    wtr.acks.store(0, Relaxed);
-    wtr.counter.fetch_add(1, Relaxed);
+async fn propagate_write(ctx: &Ctx, wtr: &Writer, data: &AbdMessageData, tag: AbdTag) {
+    wtr.phase.store(2, Ordering::Relaxed);
+    wtr.acks.store(0, Ordering::Relaxed);
+    wtr.counter.fetch_add(1, Ordering::Relaxed);
 
     let prop = AbdMessage::new(
-        wtr.counter.load(Relaxed),
-        data,
+        wtr.counter.load(Ordering::Relaxed),
+        *data,
         AbdRole::Server,
         ctx.id,
         AbdRole::Writer,
@@ -561,16 +575,18 @@ async fn propagate_write(ctx: &Ctx, wtr: &Writer, data: AbdMessageData, tag: Abd
 
 async fn wtr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
     let wtr = &ctx.state.writer;
-    if wtr.phase.load(Relaxed) != 2 || ack.counter != wtr.counter.load(Relaxed) {
+    if wtr.phase.load(Ordering::Relaxed) != 2 || ack.counter != wtr.counter.load(Ordering::Relaxed)
+    {
         return;
     }
-    if wtr.acks.fetch_add(1, Relaxed) + 1 < majority(ctx.replicas) {
+    if wtr.acks.fetch_add(1, Ordering::Relaxed) + 1 < majority(ctx.replicas) {
         return;
     }
 
-    wtr.phase.store(0, Release);
+    wtr.phase.store(0, Ordering::Release);
     let tag = wtr.buffer.lock().await.tag;
-    if let Some(client) = wtr.client.lock().await.take() {
+    let maybe_client = wtr.client.lock().await.take();
+    if let Some(client) = maybe_client {
         let reply = AbdMessage::new(
             0,
             ack.data,
@@ -600,15 +616,13 @@ async fn handle_proxy_ack(ctx: &Ctx, msg: AbdMessage) {
     info!("proxy: received WRITE-ACK from writer #1");
 
     let wtr = &ctx.state.writer;
-    if wtr.phase.load(Relaxed) != 3 {
+    if wtr.phase.load(Ordering::Relaxed) != 3 {
         return;
     }
 
-    let client = match wtr.client.lock().await.take() {
-        Some(c) => c,
-        None => return,
-    };
-    wtr.phase.store(0, Release);
+    let maybe_client = wtr.client.lock().await.take();
+    let Some(client) = maybe_client else { return };
+    wtr.phase.store(0, Ordering::Release);
 
     let ack = AbdMessage::new(
         0,
