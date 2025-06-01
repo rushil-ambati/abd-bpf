@@ -189,6 +189,42 @@ pub struct AbdMessageData {
     person: [u8; 128],
     hashmap: [u8; 1024],
 }
+impl AbdMessageData {
+    /// Constructs a new `AbdMessageData` with the given parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `int` - An integer value.
+    /// * `text` - A text string (up to 8 bytes).
+    /// * `ip` - An IP address.
+    /// * `duration` - A duration value.
+    /// * `point` - A point represented by two floating-point numbers.
+    /// * `char_opt` - An optional character.
+    /// * `person` - JSON-encoded person metadata.
+    /// * `hashmap` - JSON-encoded hashmap.
+    #[must_use]
+    pub fn new(
+        int: i64,
+        text: [u8; 8],
+        ip: IpAddr,
+        duration: Duration,
+        point: (f32, f32),
+        char_opt: Option<char>,
+        person: [u8; 128],
+        hashmap: [u8; 1024],
+    ) -> Self {
+        Self {
+            int,
+            text,
+            ip,
+            duration,
+            point,
+            char_opt,
+            person,
+            hashmap,
+        }
+    }
+}
 #[cfg(feature = "user")]
 impl Default for AbdMessageData {
     fn default() -> Self {

@@ -204,6 +204,7 @@ async fn worker(ctx: Ctx) -> Result<()> {
             Ok(AbdRole::Server) => handle_server(&ctx, msg, peer).await,
             Ok(AbdRole::Reader) => handle_reader(&ctx, msg, peer).await,
             Ok(AbdRole::Writer) => handle_writer(&ctx, msg, peer).await,
+            #[cfg(not(feature = "multi-writer"))]
             Ok(AbdRole::Client) => handle_proxy_ack(&ctx, msg).await,
             _ => warn!("invalid recipient_role {}", msg.recipient_role),
         }
@@ -604,7 +605,7 @@ async fn wtr_on_write_ack(ctx: &Ctx, ack: AbdMessage) {
 // ────────────────────────────────────────────────────────────────────────────
 // PROXY ACK handling  (single-writer mode)
 // ────────────────────────────────────────────────────────────────────────────
-
+#[cfg(not(feature = "multi-writer"))]
 async fn handle_proxy_ack(ctx: &Ctx, msg: AbdMessage) {
     if is_writer(ctx.id) {
         return;

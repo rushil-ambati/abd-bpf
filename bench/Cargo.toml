@@ -1,0 +1,25 @@
+[package]
+name = "bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+abd = { path = "../abd" }
+abd-common = { path = "../abd-common", features = ["user"] }
+anyhow = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+clap = { workspace = true, features = ["derive"] }
+criterion = "0.5"
+ctrlc = "3.4"
+env_logger = { workspace = true }
+log = { workspace = true }
+netns-rs = { workspace = true }
+network-interface = { workspace = true }
+rkyv = { workspace = true, default-features = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = "1.0"
+tokio = { workspace = true, features = ["full"] }
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
