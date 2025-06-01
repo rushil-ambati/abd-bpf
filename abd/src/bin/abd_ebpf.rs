@@ -1,40 +1,43 @@
-use abd::populate_nodes_map;
-use abd_common::constants::ABD_IFACE_NODE_PREFIX;
-use anyhow::Context;
+use abd::{populate_nodes_map_from_config, ClusterConfig};
+use anyhow::{bail, Context};
 use aya::{
     programs::{tc, SchedClassifier, TcAttachType, Xdp, XdpFlags},
     EbpfLoader,
 };
 use clap::Parser;
 use log::{debug, info, logger, warn};
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use tokio::signal;
 
 /// Run an ABD eBPF node onto an interface.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Total number of replicas
-    #[arg(long)]
-    num_nodes: u32,
-
     /// This node’s id (1‥N)
     #[arg(long)]
     node_id: u32,
+
+    /// Path to cluster config file (JSON)
+    #[arg(long)]
+    config: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let Args { num_nodes, node_id } = Args::parse();
-
-    if node_id == 0 || node_id > num_nodes {
-        return Err(anyhow::anyhow!(
-            "node_id must be between 1 and num_nodes (inclusive)"
-        ));
-    }
-    let iface = format!("{ABD_IFACE_NODE_PREFIX}{node_id}");
-
     env_logger::builder().format_timestamp(None).init();
+
+    let Args { node_id, config } = Args::parse();
+
+    // Load cluster config
+    let cluster_config = ClusterConfig::load_from_file(&config)?;
+    let num_nodes = cluster_config.num_nodes;
+    if !(1..=num_nodes).contains(&node_id) {
+        bail!("--node-id must be in 1‥={num_nodes}");
+    }
+
+    let node_config = cluster_config
+        .get_node(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node {} not found in config", node_id))?;
+    let iface = &node_config.interface;
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
@@ -79,12 +82,11 @@ async fn main() -> anyhow::Result<()> {
     program_tc.load()?;
     program_tc.attach(&iface, TcAttachType::Ingress)?;
 
-    // Populate the node info maps
-    let network_interfaces = NetworkInterface::show().unwrap();
+    // Populate the node info maps from config
     let nodes_map_tc = ebpf_tc.map_mut("NODES").unwrap();
-    populate_nodes_map(nodes_map_tc, &network_interfaces, num_nodes)?;
     let nodes_map_xdp = ebpf_xdp.map_mut("NODES").unwrap();
-    populate_nodes_map(nodes_map_xdp, &network_interfaces, num_nodes)?;
+    populate_nodes_map_from_config(nodes_map_tc, &cluster_config)?;
+    populate_nodes_map_from_config(nodes_map_xdp, &cluster_config)?;
 
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;

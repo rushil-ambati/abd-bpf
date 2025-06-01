@@ -22,9 +22,9 @@ use std::{
     },
 };
 
-use abd::get_iface_info;
+use abd::ClusterConfig;
 use abd_common::{
-    constants::{ABD_IFACE_NODE_PREFIX, ABD_UDP_PORT},
+    constants::ABD_UDP_PORT,
     message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
     tag::{self, AbdTag},
 };
@@ -32,7 +32,6 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use env_logger::Env;
 use log::{debug, error, info, warn};
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use rkyv::{access, deserialize, rancor::Error as RkyvError};
 use tokio::{
     net::UdpSocket,
@@ -130,9 +129,9 @@ struct Cli {
     #[arg(long)]
     node_id: u32,
 
-    /// Total number of replicas.
+    /// Path to cluster config file (JSON)
     #[arg(long)]
-    num_nodes: u32,
+    config: String,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -142,20 +141,20 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-    let Cli { node_id, num_nodes } = Cli::parse();
+    let Cli { node_id, config } = Cli::parse();
 
+    // Load cluster config and resolve peer addresses
+    let cluster_config = ClusterConfig::load_from_file(&config)?;
+    let num_nodes = cluster_config.num_nodes;
     if !(1..=num_nodes).contains(&node_id) {
         bail!("--node-id must be in 1‥={num_nodes}");
     }
 
-    // Resolve every node’s IPv4 address (host view).
-    let ifaces = NetworkInterface::show()?;
-    let peers: Vec<_> = (1..=num_nodes)
-        .map(|id| {
-            let ip = get_iface_info(&ifaces, &format!("{ABD_IFACE_NODE_PREFIX}{id}"))?.ipv4;
-            Ok(SocketAddr::from((ip, ABD_UDP_PORT)))
-        })
-        .collect::<Result<_>>()?;
+    let peers: Vec<_> = cluster_config
+        .nodes
+        .iter()
+        .map(|n| std::net::SocketAddr::from((n.ipv4, ABD_UDP_PORT)))
+        .collect();
 
     let bind_addr = peers[(node_id - 1) as usize];
     let peers = Arc::new(peers);
@@ -192,6 +191,7 @@ async fn worker(ctx: Ctx) -> Result<()> {
 
     loop {
         let (n, peer) = ctx.sock.recv_from(&mut buf).await?;
+        info!("received {} bytes from {peer}", n);
 
         let Ok(msg) = access::<ArchivedAbdMessage, RkyvError>(&buf[..n])
             .and_then(deserialize::<AbdMessage, RkyvError>)

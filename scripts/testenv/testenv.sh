@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=all
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # Script to setup and manage test environment for the XDP tutorial.
@@ -31,9 +32,9 @@ RUN_ON_INNER=0
 
 # State variables that are written to and read from statefile
 STATEVARS=(IP6_PREFIX IP4_PREFIX
-           INSIDE_IP6 INSIDE_IP4 INSIDE_MAC
-           OUTSIDE_IP6 OUTSIDE_IP4 OUTSIDE_MAC
-           ENABLE_IPV4 ENABLE_VLAN)
+    INSIDE_IP6 INSIDE_IP4 INSIDE_MAC
+    OUTSIDE_IP6 OUTSIDE_IP4 OUTSIDE_MAC
+    ENABLE_IPV4 ENABLE_VLAN)
 IP6_PREFIX=
 IP4_PREFIX=
 INSIDE_IP6=
@@ -45,18 +46,16 @@ OUTSIDE_MAC=
 ENABLE_IPV4=0
 ENABLE_VLAN=0
 
-die()
-{
+die() {
     echo "$1" >&2
     exit 1
 }
 
-check_prereq()
-{
+check_prereq() {
     local max_locked_mem=$(ulimit -l)
 
     for t in $NEEDED_TOOLS; do
-        which "$t" > /dev/null || die "Missing required tools: $t"
+        which "$t" >/dev/null || die "Missing required tools: $t"
     done
 
     if [ "$EUID" -ne "0" ]; then
@@ -66,16 +65,15 @@ check_prereq()
     [ -d "$STATEDIR" ] || mkdir -p "$STATEDIR" || die "Unable to create state dir $STATEDIR"
 
     if [ "$max_locked_mem" != "unlimited" ]; then
-	ulimit -l unlimited || die "Unable to set ulimit"
+        ulimit -l unlimited || die "Unable to set ulimit"
     fi
 }
 
-get_nsname()
-{
+get_nsname() {
     local GENERATE=${1:-0}
 
     if [ -z "$NS" ]; then
-        [ -f "$STATEDIR/current" ] && NS=$(< "$STATEDIR/current")
+        [ -f "$STATEDIR/current" ] && NS=$(<"$STATEDIR/current")
 
         if [ "$GENERATE" -eq "1" ] && [ -z "$NS" -o "$GENERATE_NEW" -eq "1" ]; then
             NS=$(printf "%s-%04x" "$GENERATED_NAME_PREFIX" $RANDOM)
@@ -89,47 +87,45 @@ get_nsname()
     STATEFILE="$STATEDIR/${NS}.state"
 }
 
-ensure_nsname()
-{
+ensure_nsname() {
     [ -z "$NS" ] && die "No environment selected; use --name to select one or 'setup' to create one"
     [ -e "$STATEFILE" ] || die "Environment for $NS doesn't seem to exist"
 
-    echo "$NS" > "$STATEDIR/current"
+    echo "$NS" >"$STATEDIR/current"
 
     read_statefile
 }
 
-get_num()
-{
+get_num() {
     local num=1
     if [ -f "$STATEDIR/highest_num" ]; then
-        num=$(( 1 + $(< "$STATEDIR/highest_num" )))
+        num=$((1 + $(<"$STATEDIR/highest_num")))
     fi
 
-    echo $num > "$STATEDIR/highest_num"
+    echo $num >"$STATEDIR/highest_num"
     printf "%x" $num
 }
 
-write_statefile()
-{
+write_statefile() {
     [ -z "$STATEFILE" ] && return 1
-    echo > "$STATEFILE"
+    echo >"$STATEFILE"
     for var in "${STATEVARS[@]}"; do
-        echo "${var}='$(eval echo '$'$var)'" >> "$STATEFILE"
+        echo "${var}='$(eval echo '$'$var)'" >>"$STATEFILE"
     done
 }
 
-read_statefile()
-{
+read_statefile() {
     local value
     for var in "${STATEVARS[@]}"; do
-        value=$(source "$STATEFILE"; eval echo '$'$var)
+        value=$(
+            source "$STATEFILE"
+            eval echo '$'$var
+        )
         eval "$var=\"$value\""
     done
 }
 
-cleanup_setup()
-{
+cleanup_setup() {
     echo "Error during setup, removing partially-configured environment '$NS'" >&2
     set +o errexit
     ip netns del "$NS" 2>/dev/null
@@ -137,14 +133,11 @@ cleanup_setup()
     rm -f "$STATEFILE"
 }
 
-cleanup_teardown()
-{
+cleanup_teardown() {
     echo "Warning: Errors during teardown, partial environment may be left" >&2
 }
 
-
-cleanup()
-{
+cleanup() {
     [ -n "$CLEANUP_FUNC" ] && $CLEANUP_FUNC
 
     [ -d "$STATEDIR" ] || return 0
@@ -157,8 +150,7 @@ cleanup()
     fi
 }
 
-iface_macaddr()
-{
+iface_macaddr() {
     local iface="$1"
     local ns="${2:-}"
     local output
@@ -171,25 +163,23 @@ iface_macaddr()
     echo "$output" | awk '{print $3}'
 }
 
-set_sysctls()
-{
+set_sysctls() {
     local iface="$1"
     local in_ns="${2:-}"
     local nscmd=
 
     [ -n "$in_ns" ] && nscmd="ip netns exec $in_ns"
     local sysctls=(accept_dad
-                   accept_ra
-                   mldv1_unsolicited_report_interval
-                   mldv2_unsolicited_report_interval)
+        accept_ra
+        mldv1_unsolicited_report_interval
+        mldv2_unsolicited_report_interval)
 
     for s in ${sysctls[*]}; do
         $nscmd sysctl -w net.ipv6.conf.$iface.${s}=0 >/dev/null
     done
 }
 
-wait_for_dev()
-{
+wait_for_dev() {
     local iface="$1"
     local in_ns="${2:-}"
     local retries=5 # max retries
@@ -199,22 +189,24 @@ wait_for_dev()
     while [ "$retries" -gt "0" ]; do
         if ! $nscmd ip addr show dev $iface | grep -q tentative; then return 0; fi
         sleep 0.5
-        retries=$((retries -1))
+        retries=$((retries - 1))
     done
 }
 
-get_vlan_prefix()
-{
+get_vlan_prefix() {
     # Split the IPv6 prefix, and add the VLAN ID to the upper byte of the fourth
     # element in the prefix. This will break if the global prefix config doesn't
     # have exactly three elements in it.
     local prefix="$1"
     local vid="$2"
-    (IFS=:; set -- $prefix; printf "%s:%s:%s:%x::" "$1" "$2" "$3" $(($4 + $vid * 4096)))
+    (
+        IFS=:
+        set -- $prefix
+        printf "%s:%s:%s:%x::" "$1" "$2" "$3" $(($4 + $vid * 4096))
+    )
 }
 
-setup()
-{
+setup() {
     get_nsname 1
 
     echo "Setting up new environment '$NS'"
@@ -305,11 +297,10 @@ setup()
 
     LEGACY_IP=0 USE_VLAN=0 run_ping -c 1
 
-    echo "$NS" > "$STATEDIR/current"
+    echo "$NS" >"$STATEDIR/current"
 }
 
-teardown()
-{
+teardown() {
     get_nsname && ensure_nsname "$NS"
 
     echo "Tearing down environment '$NS'"
@@ -322,32 +313,28 @@ teardown()
     [ -d "/sys/fs/bpf/$NS" ] && rmdir "/sys/fs/bpf/$NS" || true
 
     if [ -f "$STATEDIR/current" ]; then
-        local CUR=$(< "$STATEDIR/current" )
+        local CUR=$(<"$STATEDIR/current")
         [[ "$CUR" == "$NS" ]] && rm -f "$STATEDIR/current"
     fi
 
     CLEANUP_FUNC=
 }
 
-reset()
-{
+reset() {
     teardown && setup
 }
 
-ns_exec()
-{
+ns_exec() {
     get_nsname && ensure_nsname "$NS"
 
     ip netns exec "$NS" env TESTENV_NAME="$NS" "$SETUP_SCRIPT" "$@"
 }
 
-enter()
-{
+enter() {
     ns_exec "${SHELL:-bash}"
 }
 
-run_ping()
-{
+run_ping() {
     local PING
     local IP
 
@@ -374,8 +361,7 @@ run_ping()
     ns_exec "$PING" "$IP" "$@"
 }
 
-run_tcpdump()
-{
+run_tcpdump() {
     get_nsname && ensure_nsname "$NS"
 
     if [ "$RUN_ON_INNER" -eq "1" ]; then
@@ -385,17 +371,18 @@ run_tcpdump()
     fi
 }
 
-status()
-{
+status() {
     get_nsname
 
     echo "Currently selected environment: ${NS:-None}"
     if [ -n "$NS" ] && [ -e "$STATEFILE" ]; then
         read_statefile
-        echo -n "  Namespace:      "; ip netns | grep "^$NS"
-        echo    "  Prefix:         ${IP6_PREFIX}/${IP6_PREFIX_SIZE}"
-        [ "$ENABLE_IPV4" -eq "1" ] && echo    "  Legacy prefix:  ${IP4_PREFIX}0/${IP4_PREFIX_SIZE}"
-        echo -n "  Iface:          "; ip -br a show dev "$NS" | sed 's/\s\+/ /g'
+        echo -n "  Namespace:      "
+        ip netns | grep "^$NS"
+        echo "  Prefix:         ${IP6_PREFIX}/${IP6_PREFIX_SIZE}"
+        [ "$ENABLE_IPV4" -eq "1" ] && echo "  Legacy prefix:  ${IP4_PREFIX}0/${IP4_PREFIX_SIZE}"
+        echo -n "  Iface:          "
+        ip -br a show dev "$NS" | sed 's/\s\+/ /g'
     fi
     echo ""
 
@@ -410,8 +397,7 @@ status()
     done
 }
 
-print_alias()
-{
+print_alias() {
     local scriptname="$(readlink -e "$0")"
     local sudo=
 
@@ -424,7 +410,6 @@ print_alias()
 
     echo "" >&2
 
-
     echo "alias t='$sudo$scriptname'"
 }
 
@@ -433,8 +418,7 @@ print_alias()
 # packet03-redirecting lesson. It takes two arguments: the source and the
 # destination environment names.
 #
-populate_redirect_map()
-{
+populate_redirect_map() {
     local src="$1"
     local dest="$2"
     local src_mac=$(ip netns exec $src cat /sys/class/net/veth0/address)
@@ -445,8 +429,7 @@ populate_redirect_map()
     ./xdp_prog_user -d $dest -r $src --src-mac $dest_mac --dest-mac $src_mac
 }
 
-xdp_load()
-{
+xdp_load() {
     get_nsname && ensure_nsname
 
     [ -x "$XDP_LOADER" ] || die "Loader '$XDP_LOADER' is not executable"
@@ -455,24 +438,21 @@ xdp_load()
     $XDP_LOADER load $load_opts $NS $objfile
 }
 
-xdp_unload()
-{
+xdp_unload() {
     get_nsname && ensure_nsname
 
     [ -x "$XDP_LOADER" ] || die "Loader '$XDP_LOADER' is not executable"
     $XDP_LOADER unload "$@" "$NS"
 }
 
-xdp_stats()
-{
+xdp_stats() {
     get_nsname && ensure_nsname
 
     [ -x "$XDP_STATS" ] || die "Stats tool '$XDP_STATS' is not executable"
     $XDP_STATS --dev "$NS" "$@"
 }
 
-usage()
-{
+usage() {
     local FULL=${1:-}
 
     echo "Usage: $0 [options] <command> [param]"
@@ -493,7 +473,7 @@ usage()
     echo "redirect <env1> <env2>  Setup redirects for packet03 lessons"
     echo ""
 
-    if [ -z "$FULL" ] ; then
+    if [ -z "$FULL" ]; then
         echo "Use --help to see the list of options."
         exit 1
     fi
@@ -534,7 +514,6 @@ usage()
     exit 1
 }
 
-
 OPTS="hn:gl:s:"
 LONGOPTS="help,name:,gen-new,loader:,stats:,legacy-ip,vlan,inner"
 
@@ -543,76 +522,75 @@ OPTIONS=$(getopt -o "$OPTS" --long "$LONGOPTS" -- "$@")
 
 eval set -- "$OPTIONS"
 
-
 while true; do
     arg="$1"
     shift
 
     case "$arg" in
-        -h | --help)
-            usage full >&2
-            ;;
-        -n | --name)
-            NS="$1"
-            shift
-            ;;
-        -l | --loader)
-            XDP_LOADER="$1"
-            shift
-            ;;
-        -s | --stats)
-            XDP_STATS="$1"
-            shift
-            ;;
-        -g | --gen-new)
-            GENERATE_NEW=1
-            ;;
-        --legacy-ip)
-            LEGACY_IP=1
-            ;;
-        --vlan)
-            USE_VLAN=1
-            ;;
-        --inner)
-            RUN_ON_INNER=1
-            ;;
-        -- )
-            break
-            ;;
+    -h | --help)
+        usage full >&2
+        ;;
+    -n | --name)
+        NS="$1"
+        shift
+        ;;
+    -l | --loader)
+        XDP_LOADER="$1"
+        shift
+        ;;
+    -s | --stats)
+        XDP_STATS="$1"
+        shift
+        ;;
+    -g | --gen-new)
+        GENERATE_NEW=1
+        ;;
+    --legacy-ip)
+        LEGACY_IP=1
+        ;;
+    --vlan)
+        USE_VLAN=1
+        ;;
+    --inner)
+        RUN_ON_INNER=1
+        ;;
+    --)
+        break
+        ;;
     esac
 done
 
 [ "$#" -eq 0 ] && usage >&2
 
 case "$1" in
-    st|sta|status)
-        CMD=status
-        ;;
-    setup|teardown|reset|enter)
-        CMD="$1"
-        ;;
-    load|unload|stats)
-        CMD="xdp_$1"
-        ;;
-    "exec")
-        CMD=ns_exec
-        ;;
-    ping|tcpdump)
-        CMD="run_$1"
-        ;;
-    redirect)
-        CMD=populate_redirect_map
-        ;;
-    "alias")
-        print_alias
-        exit 0
-        ;;
-    "help")
-        usage full >&2
-        ;;
-    *)
-        usage >&2
-        ;;
+st | sta | status)
+    CMD=status
+    ;;
+setup | teardown | reset | enter)
+    CMD="$1"
+    ;;
+load | unload | stats)
+    CMD="xdp_$1"
+    ;;
+"exec")
+    CMD=ns_exec
+    ;;
+ping | tcpdump)
+    CMD="run_$1"
+    ;;
+redirect)
+    CMD=populate_redirect_map
+    ;;
+"alias")
+    print_alias
+    exit 0
+    ;;
+"help")
+    usage full >&2
+    ;;
+*)
+    usage >&2
+    ;;
 esac
 
 shift

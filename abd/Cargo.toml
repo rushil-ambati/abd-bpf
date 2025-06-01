@@ -17,9 +17,10 @@ env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 netns-rs = { workspace = true }
-network-interface = { workspace = true }
 num_cpus = { workspace = true }
 rkyv = { workspace = true, default-features = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }

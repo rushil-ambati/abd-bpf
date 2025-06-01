@@ -518,7 +518,7 @@ fn handle_write_ack(
     let client = CLIENT_INFO.get(i).ok_or(AbdError::MapLookupError)?;
     let me = NODES.get(my_id).ok_or(AbdError::MapLookupError)?;
     redirect_to_client(ctx, client, me).inspect(|_| {
-        info!(ctx, "{}: R-ACK -> {}", tc::itos(i), client.ipv4);
+        info!(ctx, "{}: ACK -> {}", tc::itos(i), client.ipv4);
     })
 }
 

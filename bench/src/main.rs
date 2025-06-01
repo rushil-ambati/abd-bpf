@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use abd::get_iface_info;
+use abd::ClusterConfig;
 use abd_common::{
     constants::ABD_UDP_PORT,
     message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
@@ -24,7 +24,6 @@ use anyhow::{self, Context};
 use clap::{Parser, Subcommand};
 use log::{debug, info, warn};
 use netns_rs::NetNs;
-use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 use rkyv::{access, deserialize, rancor::Error as RkyvError};
 use serde::{Deserialize, Serialize};
 
@@ -46,12 +45,12 @@ enum BenchCommand {
 
 #[derive(Parser, Debug)]
 struct LatencyOpts {
-    /// Number of nodes in the cluster
-    #[arg(long, default_value = "3")]
-    num_nodes: u32,
+    /// Path to cluster config file (JSON)
+    #[arg(long)]
+    config: String,
 
     /// Number of iterations per operation
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value = "1000")]
     iterations: u32,
 
     /// Output file for results
@@ -66,9 +65,9 @@ struct LatencyOpts {
 #[derive(Parser, Debug)]
 #[allow(dead_code)]
 struct ThroughputOpts {
-    /// Placeholder for future throughput benchmarks
-    #[arg(long, default_value = "3")]
-    num_nodes: u32,
+    /// Path to cluster config file (JSON)
+    #[arg(long)]
+    config: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -110,18 +109,36 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
+    // Load cluster config
+    let cluster_config = ClusterConfig::load_from_file(&opts.config)?;
+    let num_nodes = cluster_config.num_nodes;
     info!(
         "Starting latency benchmark with {} nodes, {} iterations",
-        opts.num_nodes, opts.iterations
+        num_nodes, opts.iterations
     );
 
-    // Discover node IPs
-    let node_ips = discover_node_ips(opts.num_nodes)?;
-    info!("Discovered node IPs: {:?}", node_ips);
+    // Build node_ips and node_interfaces from config
+    let node_ips: HashMap<u32, Ipv4Addr> = cluster_config
+        .nodes
+        .iter()
+        .map(|n| (n.node_id, n.ipv4))
+        .collect();
+    let node_interfaces: HashMap<u32, String> = cluster_config
+        .nodes
+        .iter()
+        .map(|n| (n.node_id, n.interface.clone()))
+        .collect();
+    info!("Loaded node IPs from config: {:?}", node_ips);
+
+    let use_netns = cluster_config.mode.as_deref() == Some("ebpf");
+    info!(
+        "Using network namespaces: {}",
+        if use_netns { "enabled" } else { "disabled" }
+    );
 
     let mut results = LatencyResults {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        num_nodes: opts.num_nodes,
+        num_nodes,
         iterations: opts.iterations,
         write_latencies: HashMap::new(),
         read_latencies: HashMap::new(),
@@ -141,9 +158,10 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
     let base_value = "int=88 text=world ip=2001:0db8:85a3:0000:0000:8a2e:0370:7334 duration=3600 point=(-0.3,4.1) person=(Alice,30)";
 
     // Benchmark each node
-    for node_id in 1..=opts.num_nodes {
+    for node_id in 1..=num_nodes {
         info!("Benchmarking node {}", node_id);
         let node_ip = node_ips[&node_id];
+        let node_iface = &node_interfaces[&node_id];
 
         // Create test data for this node
         let test_value = format!(
@@ -154,13 +172,25 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
             AbdMessageData::from_str(&test_value).unwrap_or_else(|_| AbdMessageData::default());
 
         // Benchmark writes from this node
-        let write_latencies =
-            benchmark_writes_from_node(node_id, node_ip, test_data, opts.iterations, opts.warmup)?;
+        let write_latencies = benchmark_writes_from_node(
+            node_id,
+            node_ip,
+            node_iface,
+            test_data,
+            opts.iterations,
+            opts.warmup,
+            use_netns,
+        )?;
         results.write_latencies.insert(node_id, write_latencies);
 
         // Benchmark reads from all nodes
-        let read_latencies =
-            benchmark_reads_from_all_nodes(&node_ips, opts.iterations, opts.warmup)?;
+        let read_latencies = benchmark_reads_from_all_nodes(
+            &node_ips,
+            &node_interfaces,
+            opts.iterations,
+            opts.warmup,
+            use_netns,
+        )?;
         results.read_latencies.insert(node_id, read_latencies);
     }
 
@@ -176,32 +206,24 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn discover_node_ips(num_nodes: u32) -> anyhow::Result<HashMap<u32, Ipv4Addr>> {
-    use abd_common::constants::ABD_IFACE_NODE_PREFIX;
-    let ifaces = NetworkInterface::show()?;
-    let mut node_ips = HashMap::new();
-
-    for i in 1..=num_nodes {
-        let iface_name = format!("{}{}", ABD_IFACE_NODE_PREFIX, i);
-        let info = get_iface_info(&ifaces, &iface_name)?;
-        node_ips.insert(i, info.ipv4);
-    }
-
-    Ok(node_ips)
-}
-
 fn benchmark_writes_from_node(
     node_id: u32,
     node_ip: Ipv4Addr,
+    node_iface: &str,
     data: AbdMessageData,
     iterations: u32,
     warmup: u32,
+    use_netns: bool,
 ) -> anyhow::Result<Vec<f64>> {
-    let env_name = format!("node{}", node_id);
-    let netns =
-        NetNs::get(&env_name).context(format!("Failed to get network namespace {}", env_name))?;
-
     let mut latencies = Vec::new();
+    let netns = if use_netns {
+        Some(
+            NetNs::get(node_iface)
+                .context(format!("Failed to get network namespace {}", node_iface))?,
+        )
+    } else {
+        None
+    };
 
     // Warmup
     info!(
@@ -209,7 +231,12 @@ fn benchmark_writes_from_node(
         node_id, warmup
     );
     for _ in 0..warmup {
-        let _ = netns.run(|_| perform_write_operation(node_ip, data));
+        let res = if let Some(ref ns) = netns {
+            ns.run(|_| perform_write_operation(node_ip, data))?
+        } else {
+            perform_write_operation(node_ip, data).map(Ok)?
+        };
+        let _ = res?;
     }
 
     // Actual benchmark
@@ -226,10 +253,16 @@ fn benchmark_writes_from_node(
                 node_id
             );
         }
-
-        let result = netns.run(|_| perform_write_operation(node_ip, data))?;
-
-        if let Ok(latency) = result {
+        let res = if let Some(ref ns) = netns {
+            ns.run(|_| perform_write_operation(node_ip, data))
+                .context(format!(
+                    "Failed to run write operation in netns for node {}",
+                    node_id
+                ))?
+        } else {
+            perform_write_operation(node_ip, data)
+        };
+        if let Ok(latency) = res {
             latencies.push(latency);
         } else {
             warn!(
@@ -249,35 +282,55 @@ fn benchmark_writes_from_node(
 
 fn benchmark_reads_from_all_nodes(
     node_ips: &HashMap<u32, Ipv4Addr>,
+    node_interfaces: &HashMap<u32, String>,
     iterations: u32,
     warmup: u32,
+    use_netns: bool,
 ) -> anyhow::Result<Vec<f64>> {
     let mut all_latencies = Vec::new();
-
     for (&read_node_id, &read_ip) in node_ips {
-        let env_name = format!("node{}", read_node_id);
-        let netns = NetNs::get(&env_name)
-            .context(format!("Failed to get network namespace {}", env_name))?;
-
+        let read_iface = &node_interfaces[&read_node_id];
+        let netns = if use_netns {
+            Some(
+                NetNs::get(read_iface)
+                    .context(format!("Failed to get network namespace {}", read_iface))?,
+            )
+        } else {
+            None
+        };
         // Warmup
         for _ in 0..warmup {
-            let _ = netns.run(|_| perform_read_operation(read_ip));
+            let res = if let Some(ref ns) = netns {
+                ns.run(|_| perform_read_operation(read_ip))
+                    .context(format!(
+                        "Failed to run read operation in netns for node {}",
+                        read_node_id
+                    ))?
+            } else {
+                perform_read_operation(read_ip)
+            };
+            let _ = res?;
         }
-
         // Actual benchmark
         debug!(
             "Benchmarking reads from node {} ({} iterations)",
             read_node_id, iterations
         );
         for _ in 0..iterations {
-            let result = netns.run(|_| perform_read_operation(read_ip))?;
-
-            if let Ok(latency) = result {
+            let res = if let Some(ref ns) = netns {
+                ns.run(|_| perform_read_operation(read_ip))
+                    .context(format!(
+                        "Failed to run read operation in netns for node {}",
+                        read_node_id
+                    ))?
+            } else {
+                perform_read_operation(read_ip)
+            };
+            if let Ok(latency) = res {
                 all_latencies.push(latency);
             }
         }
     }
-
     info!("Completed {} read operations total", all_latencies.len());
     Ok(all_latencies)
 }

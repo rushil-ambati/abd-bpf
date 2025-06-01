@@ -1,6 +1,3 @@
-/// Prefix for network interface names assigned to ABD nodes.
-pub const ABD_IFACE_NODE_PREFIX: &str = "node";
-
 /// Magic number used to identify valid ABD messages.
 pub const ABD_MAGIC: u32 = 0xdead_beef;
 
