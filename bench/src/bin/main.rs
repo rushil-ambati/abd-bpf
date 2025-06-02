@@ -75,12 +75,12 @@ struct LatencyResults {
     timestamp: String,
     num_nodes: u32,
     iterations: u32,
-    write_latencies: HashMap<u32, Vec<f64>>, // node_id -> latencies in ms
-    read_latencies: HashMap<u32, Vec<f64>>,  // node_id -> latencies in ms
+    write_latencies: HashMap<u32, Vec<f64>>, // node_id -> latencies in μs
+    read_latencies: HashMap<u32, Vec<f64>>,  // node_id -> latencies in μs
     summary: LatencySummary,
 }
 
-/// All values are in milliseconds
+/// All values are in microseconds
 #[derive(Serialize, Deserialize, Debug)]
 struct LatencySummary {
     write_avg: f64,
@@ -357,7 +357,7 @@ fn perform_write_operation(target_ip: Ipv4Addr, data: &AbdMessageData) -> anyhow
         return Err(anyhow::anyhow!("Unexpected response type"));
     }
 
-    Ok(elapsed.as_secs_f64() * 1000.0) // Convert to milliseconds
+    Ok(elapsed.as_secs_f64() * 1_000_000.0) // Convert to microseconds
 }
 
 fn perform_read_operation(target_ip: Ipv4Addr) -> anyhow::Result<f64> {
@@ -398,7 +398,7 @@ fn perform_read_operation(target_ip: Ipv4Addr) -> anyhow::Result<f64> {
         return Err(anyhow::anyhow!("Unexpected response type"));
     }
 
-    Ok(elapsed.as_secs_f64() * 1000.0) // Convert to milliseconds
+    Ok(elapsed.as_secs_f64() * 1_000_000.0) // Convert to microseconds
 }
 
 fn calculate_summary(
@@ -455,12 +455,12 @@ fn save_results(results: &LatencyResults, output_file: &str) -> anyhow::Result<(
 
 fn print_summary(summary: &LatencySummary) {
     info!("=== Latency Benchmark Results ===");
-    info!("WRITE latencies (ms):");
+    info!("WRITE latencies (μs):");
     info!("  Average: {:.2}", summary.write_avg);
     info!("  P50:     {:.2}", summary.write_p50);
     info!("  P95:     {:.2}", summary.write_p95);
     info!("  P99:     {:.2}", summary.write_p99);
-    info!("READ latencies (ms):");
+    info!("READ latencies (μs):");
     info!("  Average: {:.2}", summary.read_avg);
     info!("  P50:     {:.2}", summary.read_p50);
     info!("  P95:     {:.2}", summary.read_p95);
