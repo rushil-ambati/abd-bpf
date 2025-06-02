@@ -35,9 +35,5 @@ name = "abd-ebpf"
 path = "src/bin/abd_ebpf.rs"
 
 [[bin]]
-name = "abd-userspace"
-path = "src/bin/abd_userspace.rs"
-
-[[bin]]
 name = "xdp-pass"
 path = "src/bin/xdp_pass.rs"

@@ -62,7 +62,7 @@ async fn main() -> anyhow::Result<()> {
     }
     let program_xdp: &mut Xdp = ebpf_xdp.program_mut("abd_xdp").unwrap().try_into()?;
     program_xdp.load()?;
-    program_xdp.attach(&iface, XdpFlags::default())
+    program_xdp.attach(iface, XdpFlags::default())
         .context("failed to attach the XDP program with default flags - try changing XdpFlags::default() to XdpFlags::SKB_MODE")?;
 
     let mut ebpf_tc = EbpfLoader::new()
@@ -77,10 +77,10 @@ async fn main() -> anyhow::Result<()> {
     }
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
-    let _ = tc::qdisc_add_clsact(&iface);
+    let _ = tc::qdisc_add_clsact(iface);
     let program_tc: &mut SchedClassifier = ebpf_tc.program_mut("abd_tc").unwrap().try_into()?;
     program_tc.load()?;
-    program_tc.attach(&iface, TcAttachType::Ingress)?;
+    program_tc.attach(iface, TcAttachType::Ingress)?;
 
     // Populate the node info maps from config
     let nodes_map_tc = ebpf_tc.map_mut("NODES").unwrap();

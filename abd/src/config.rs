@@ -42,7 +42,7 @@ impl ClusterConfig {
         let content = fs::read_to_string(path.as_ref())
             .with_context(|| format!("Failed to read config file: {}", path.as_ref().display()))?;
 
-        let config: ClusterConfig = serde_json::from_str(&content)
+        let config: Self = serde_json::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", path.as_ref().display()))?;
 
         // Validate configuration
@@ -73,7 +73,7 @@ impl ClusterConfig {
         }
 
         // Check for duplicate node IDs
-        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_node_ids = std::collections::HashSet::new();
         for node in &self.nodes {
             if node.node_id == 0 || node.node_id > self.num_nodes {
                 anyhow::bail!(
@@ -83,7 +83,7 @@ impl ClusterConfig {
                 );
             }
 
-            if !seen_ids.insert(node.node_id) {
+            if !seen_node_ids.insert(node.node_id) {
                 anyhow::bail!("Duplicate node_id: {}", node.node_id);
             }
         }
@@ -100,13 +100,14 @@ impl ClusterConfig {
     }
 
     /// Get configuration for a specific node ID
+    #[must_use]
     pub fn get_node(&self, node_id: u32) -> Option<&NodeConfig> {
         self.nodes.iter().find(|node| node.node_id == node_id)
     }
 }
 
 impl NodeConfig {
-    /// Convert this node configuration to a NodeInfo struct
+    /// Convert this node configuration to a `NodeInfo` struct
     pub fn to_node_info(&self) -> Result<NodeInfo> {
         let mac = parse_mac(&self.mac)?;
         Ok(NodeInfo::new(self.ifindex, self.ipv4, mac))
@@ -119,12 +120,12 @@ pub fn parse_mac(mac_str: &str) -> Result<[u8; 6], anyhow::Error> {
         .split(':')
         .map(|h| u8::from_str_radix(h, 16))
         .collect::<Result<_, _>>()
-        .with_context(|| format!("Invalid MAC address format: {}", mac_str))?;
+        .with_context(|| format!("Invalid MAC address format: {mac_str}"))?;
 
     if bytes.len() == 6 {
         Ok([bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]])
     } else {
-        anyhow::bail!("Invalid MAC address format: {}", mac_str);
+        anyhow::bail!("Invalid MAC address format: {mac_str}");
     }
 }
 
@@ -180,7 +181,7 @@ mod tests {
         assert!(bad_config.validate().is_err());
 
         // Test node count mismatch
-        let mut bad_config = config.clone();
+        let mut bad_config = config;
         bad_config.num_nodes = 3;
         assert!(bad_config.validate().is_err());
     }

@@ -50,7 +50,7 @@ struct LatencyOpts {
     config: String,
 
     /// Number of iterations per operation
-    #[arg(long, default_value = "1000")]
+    #[arg(long, default_value = "10000")]
     iterations: u32,
 
     /// Output file for results
@@ -80,16 +80,17 @@ struct LatencyResults {
     summary: LatencySummary,
 }
 
+/// All values are in milliseconds
 #[derive(Serialize, Deserialize, Debug)]
 struct LatencySummary {
-    write_avg_ms: f64,
-    write_p50_ms: f64,
-    write_p95_ms: f64,
-    write_p99_ms: f64,
-    read_avg_ms: f64,
-    read_p50_ms: f64,
-    read_p95_ms: f64,
-    read_p99_ms: f64,
+    write_avg: f64,
+    write_p50: f64,
+    write_p95: f64,
+    write_p99: f64,
+    read_avg: f64,
+    read_p50: f64,
+    read_p95: f64,
+    read_p99: f64,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -101,14 +102,14 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        BenchCommand::Latency(opts) => run_latency_benchmark(opts),
+        BenchCommand::Latency(opts) => run_latency_benchmark(&opts),
         BenchCommand::Throughput(_opts) => {
             unimplemented!("Throughput benchmarks not yet implemented")
         }
     }
 }
 
-fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
+fn run_latency_benchmark(opts: &LatencyOpts) -> anyhow::Result<()> {
     // Load cluster config
     let cluster_config = ClusterConfig::load_from_file(&opts.config)?;
     let num_nodes = cluster_config.num_nodes;
@@ -128,7 +129,7 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
         .iter()
         .map(|n| (n.node_id, n.interface.clone()))
         .collect();
-    info!("Loaded node IPs from config: {:?}", node_ips);
+    info!("Loaded node IPs from config: {node_ips:?}");
 
     let use_netns = cluster_config.mode.as_deref() == Some("ebpf");
     info!(
@@ -143,14 +144,14 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
         write_latencies: HashMap::new(),
         read_latencies: HashMap::new(),
         summary: LatencySummary {
-            write_avg_ms: 0.0,
-            write_p50_ms: 0.0,
-            write_p95_ms: 0.0,
-            write_p99_ms: 0.0,
-            read_avg_ms: 0.0,
-            read_p50_ms: 0.0,
-            read_p95_ms: 0.0,
-            read_p99_ms: 0.0,
+            write_avg: 0.0,
+            write_p50: 0.0,
+            write_p95: 0.0,
+            write_p99: 0.0,
+            read_avg: 0.0,
+            read_p50: 0.0,
+            read_p95: 0.0,
+            read_p99: 0.0,
         },
     };
 
@@ -159,15 +160,13 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
 
     // Benchmark each node
     for node_id in 1..=num_nodes {
-        info!("Benchmarking node {}", node_id);
+        info!("Benchmarking node {node_id}");
         let node_ip = node_ips[&node_id];
         let node_iface = &node_interfaces[&node_id];
 
         // Create test data for this node
-        let test_value = format!(
-            "{} hashmap={{author:node{};version:1.0;license:MIT}}",
-            base_value, node_id
-        );
+        let test_value =
+            format!("{base_value} hashmap={{author:node{node_id};version:1.0;license:MIT}}");
         let test_data =
             AbdMessageData::from_str(&test_value).unwrap_or_else(|_| AbdMessageData::default());
 
@@ -176,7 +175,7 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
             node_id,
             node_ip,
             node_iface,
-            test_data,
+            &test_data,
             opts.iterations,
             opts.warmup,
             use_netns,
@@ -208,9 +207,9 @@ fn run_latency_benchmark(opts: LatencyOpts) -> anyhow::Result<()> {
 
 fn benchmark_writes_from_node(
     node_id: u32,
-    node_ip: Ipv4Addr,
+    node_ipv4: Ipv4Addr,
     node_iface: &str,
-    data: AbdMessageData,
+    data: &AbdMessageData,
     iterations: u32,
     warmup: u32,
     use_netns: bool,
@@ -219,31 +218,25 @@ fn benchmark_writes_from_node(
     let netns = if use_netns {
         Some(
             NetNs::get(node_iface)
-                .context(format!("Failed to get network namespace {}", node_iface))?,
+                .context(format!("Failed to get network namespace {node_iface}"))?,
         )
     } else {
         None
     };
 
     // Warmup
-    info!(
-        "Warming up writes for node {} ({} iterations)",
-        node_id, warmup
-    );
+    info!("Warming up writes for node {node_id} ({warmup} iterations)");
     for _ in 0..warmup {
         let res = if let Some(ref ns) = netns {
-            ns.run(|_| perform_write_operation(node_ip, data))?
+            ns.run(|_| perform_write_operation(node_ipv4, data))?
         } else {
-            perform_write_operation(node_ip, data).map(Ok)?
+            perform_write_operation(node_ipv4, data).map(Ok)?
         };
         let _ = res?;
     }
 
     // Actual benchmark
-    info!(
-        "Benchmarking writes for node {} ({} iterations)",
-        node_id, iterations
-    );
+    info!("Benchmarking writes for node {node_id} ({iterations} iterations)");
     for i in 0..iterations {
         if i % 10 == 0 {
             debug!(
@@ -254,21 +247,17 @@ fn benchmark_writes_from_node(
             );
         }
         let res = if let Some(ref ns) = netns {
-            ns.run(|_| perform_write_operation(node_ip, data))
+            ns.run(|_| perform_write_operation(node_ipv4, data))
                 .context(format!(
-                    "Failed to run write operation in netns for node {}",
-                    node_id
+                    "Failed to run write operation in netns for node {node_id}"
                 ))?
         } else {
-            perform_write_operation(node_ip, data)
+            perform_write_operation(node_ipv4, data)
         };
         if let Ok(latency) = res {
             latencies.push(latency);
         } else {
-            warn!(
-                "Write operation failed for node {} iteration {}",
-                node_id, i
-            );
+            warn!("Write operation failed for node {node_id} iteration {i}");
         }
     }
 
@@ -293,7 +282,7 @@ fn benchmark_reads_from_all_nodes(
         let netns = if use_netns {
             Some(
                 NetNs::get(read_iface)
-                    .context(format!("Failed to get network namespace {}", read_iface))?,
+                    .context(format!("Failed to get network namespace {read_iface}"))?,
             )
         } else {
             None
@@ -303,8 +292,7 @@ fn benchmark_reads_from_all_nodes(
             let res = if let Some(ref ns) = netns {
                 ns.run(|_| perform_read_operation(read_ip))
                     .context(format!(
-                        "Failed to run read operation in netns for node {}",
-                        read_node_id
+                        "Failed to run read operation in netns for node {read_node_id}"
                     ))?
             } else {
                 perform_read_operation(read_ip)
@@ -312,16 +300,12 @@ fn benchmark_reads_from_all_nodes(
             let _ = res?;
         }
         // Actual benchmark
-        debug!(
-            "Benchmarking reads from node {} ({} iterations)",
-            read_node_id, iterations
-        );
+        debug!("Benchmarking reads from node {read_node_id} ({iterations} iterations)",);
         for _ in 0..iterations {
             let res = if let Some(ref ns) = netns {
                 ns.run(|_| perform_read_operation(read_ip))
                     .context(format!(
-                        "Failed to run read operation in netns for node {}",
-                        read_node_id
+                        "Failed to run read operation in netns for node {read_node_id}"
                     ))?
             } else {
                 perform_read_operation(read_ip)
@@ -335,14 +319,14 @@ fn benchmark_reads_from_all_nodes(
     Ok(all_latencies)
 }
 
-fn perform_write_operation(target_ip: Ipv4Addr, data: AbdMessageData) -> anyhow::Result<f64> {
+fn perform_write_operation(target_ip: Ipv4Addr, data: &AbdMessageData) -> anyhow::Result<f64> {
     let msg = AbdMessage::new(
-        0,               // counter
-        data,            // data
-        AbdRole::Writer, // recipient_role
-        0,               // sender_id
-        AbdRole::Client, // sender_role
-        0,               // tag
+        0,
+        *data,
+        AbdRole::Writer,
+        0,
+        AbdRole::Client,
+        0,
         AbdMessageType::Write,
     );
 
@@ -425,14 +409,14 @@ fn calculate_summary(
     let all_reads: Vec<f64> = read_latencies.values().flatten().copied().collect();
 
     LatencySummary {
-        write_avg_ms: calculate_average(&all_writes),
-        write_p50_ms: calculate_percentile(&all_writes, 50.0),
-        write_p95_ms: calculate_percentile(&all_writes, 95.0),
-        write_p99_ms: calculate_percentile(&all_writes, 99.0),
-        read_avg_ms: calculate_average(&all_reads),
-        read_p50_ms: calculate_percentile(&all_reads, 50.0),
-        read_p95_ms: calculate_percentile(&all_reads, 95.0),
-        read_p99_ms: calculate_percentile(&all_reads, 99.0),
+        write_avg: calculate_average(&all_writes),
+        write_p50: calculate_percentile(&all_writes, 50.0),
+        write_p95: calculate_percentile(&all_writes, 95.0),
+        write_p99: calculate_percentile(&all_writes, 99.0),
+        read_avg: calculate_average(&all_reads),
+        read_p50: calculate_percentile(&all_reads, 50.0),
+        read_p95: calculate_percentile(&all_reads, 95.0),
+        read_p99: calculate_percentile(&all_reads, 99.0),
     }
 }
 
@@ -440,7 +424,8 @@ fn calculate_average(values: &[f64]) -> f64 {
     if values.is_empty() {
         0.0
     } else {
-        values.iter().sum::<f64>() / values.len() as f64
+        let len = u32::try_from(values.len()).unwrap();
+        values.iter().sum::<f64>() / f64::from(len)
     }
 }
 
@@ -452,28 +437,32 @@ fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-    let index = (percentile / 100.0 * (sorted.len() - 1) as f64).round() as usize;
-    sorted[index.min(sorted.len() - 1)]
+    let len = u32::try_from(sorted.len()).unwrap();
+    let idx_f = percentile / 100.0 * f64::from(len - 1);
+    #[allow(clippy::cast_sign_loss)]
+    #[allow(clippy::cast_possible_truncation)]
+    let index = idx_f.round() as u32;
+    sorted[index.min(len - 1) as usize]
 }
 
 fn save_results(results: &LatencyResults, output_file: &str) -> anyhow::Result<()> {
     let json = serde_json::to_string_pretty(results)?;
     let mut file = File::create(output_file)?;
     file.write_all(json.as_bytes())?;
-    info!("Results saved to {}", output_file);
+    info!("Results saved to {output_file}");
     Ok(())
 }
 
 fn print_summary(summary: &LatencySummary) {
     info!("=== Latency Benchmark Results ===");
     info!("WRITE latencies (ms):");
-    info!("  Average: {:.2}", summary.write_avg_ms);
-    info!("  P50:     {:.2}", summary.write_p50_ms);
-    info!("  P95:     {:.2}", summary.write_p95_ms);
-    info!("  P99:     {:.2}", summary.write_p99_ms);
+    info!("  Average: {:.2}", summary.write_avg);
+    info!("  P50:     {:.2}", summary.write_p50);
+    info!("  P95:     {:.2}", summary.write_p95);
+    info!("  P99:     {:.2}", summary.write_p99);
     info!("READ latencies (ms):");
-    info!("  Average: {:.2}", summary.read_avg_ms);
-    info!("  P50:     {:.2}", summary.read_p50_ms);
-    info!("  P95:     {:.2}", summary.read_p95_ms);
-    info!("  P99:     {:.2}", summary.read_p99_ms);
+    info!("  Average: {:.2}", summary.read_avg);
+    info!("  P50:     {:.2}", summary.read_p50);
+    info!("  P95:     {:.2}", summary.read_p95);
+    info!("  P99:     {:.2}", summary.read_p99);
 }

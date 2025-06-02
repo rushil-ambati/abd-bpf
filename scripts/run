@@ -118,7 +118,6 @@ def parse_args():
     parser.add_argument(
         "subcommand",
         nargs="?",
-        default="test",
         choices=["test", "bench"],
         help="Subcommand: test or bench",
     )
@@ -249,7 +248,7 @@ def launch_nodes(num_nodes: int, userspace: bool, target_dir: Path):
             "-E",
             "bash",
             "-c",
-            f"RUST_LOG=info {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
+            f"RUST_LOG=warn {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
         )
 
 
@@ -349,11 +348,13 @@ def main():
     launch_nodes(args.num_nodes, args.userspace, target_dir)
     time.sleep(1)
     print()
+    # Only run test or bench if explicitly requested
     if args.subcommand == "test":
         run_test(args.num_nodes, args.userspace, target_dir)
     elif args.subcommand == "bench":
         run_bench(args.bench_mode, target_dir)
-    if args.wait:
+    # Default: just spin up and wait (unless -w is not set)
+    if args.wait or (args.subcommand not in ("test", "bench")):
         for proc in bg_procs:
             try:
                 proc.wait()
