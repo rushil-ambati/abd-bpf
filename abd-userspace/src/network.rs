@@ -6,12 +6,12 @@
 use std::net::SocketAddr;
 
 use abd_common::message::{AbdRole, ArchivedAbdMessage};
-use anyhow::Result;
-use log::{debug, warn};
+use anyhow::{Context, Result};
+use log::{trace, warn};
 use rkyv::{access_mut, rancor};
 use tokio::net::UdpSocket;
 
-use crate::{node, protocol::Context, server};
+use crate::{node, protocol, server};
 
 /// Create a new UDP socket with `SO_REUSEPORT` for load balancing across cores
 pub fn create_socket(bind_addr: SocketAddr) -> Result<UdpSocket> {
@@ -23,14 +23,21 @@ pub fn create_socket(bind_addr: SocketAddr) -> Result<UdpSocket> {
         Domain::IPV6
     };
 
-    let socket = Socket::new(domain, Type::DGRAM, None)?;
+    let socket = Socket::new(domain, Type::DGRAM, None)
+        .with_context(|| format!("Failed to create UDP socket for {bind_addr}"))?;
 
     // Enable SO_REUSEPORT for load balancing across multiple workers
-    socket.set_reuse_port(true)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&bind_addr.into())?;
+    socket
+        .set_reuse_port(true)
+        .with_context(|| "Failed to set SO_REUSEPORT")?;
+    socket
+        .set_nonblocking(true)
+        .with_context(|| "Failed to set socket to non-blocking mode")?;
+    socket
+        .bind(&bind_addr.into())
+        .with_context(|| format!("Failed to bind socket to {bind_addr}"))?;
 
-    Ok(UdpSocket::from_std(socket.into())?)
+    UdpSocket::from_std(socket.into()).with_context(|| "Failed to convert to tokio UdpSocket")
 }
 
 /// Send a message to a specific peer
@@ -45,7 +52,7 @@ pub async fn send_message(
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
 
     socket.send_to(bytes, peer_addr).await?;
-    debug!("Sent message to {}: {:?}", peer_addr, msg.type_.to_native());
+    trace!("Sent message to {}: {:?}", peer_addr, msg.type_.to_native());
 
     Ok(())
 }
@@ -57,15 +64,17 @@ pub async fn send_message(
 /// 2. Deserializes them into `ArchivedAbdMessage`
 /// 3. Dispatches to the appropriate handler based on recipient role
 /// 4. Implements "busy => drop" semantics identical to eBPF
-pub async fn run_worker(ctx: Context) -> Result<()> {
+pub async fn run_worker(ctx: protocol::Context) -> Result<()> {
     const MAX_PACKET_SIZE: usize = 65_536;
     let mut buffer = vec![0u8; MAX_PACKET_SIZE].into_boxed_slice();
 
-    log::info!("Starting network worker for node {}", ctx.node_id);
-
     loop {
         // Receive packet from network
-        let (packet_size, peer_addr) = ctx.socket.recv_from(&mut buffer).await?;
+        let (packet_size, peer_addr) = ctx
+            .socket
+            .recv_from(&mut buffer)
+            .await
+            .with_context(|| format!("Failed to receive UDP packet on {}", ctx.node_id))?;
 
         // Deserialize the message
         // Safety: The packet is always exactly ArchivedAbdMessage size from our protocol
@@ -78,7 +87,7 @@ pub async fn run_worker(ctx: Context) -> Result<()> {
             }
         };
 
-        debug!(
+        trace!(
             "Received message from {}: type={:?}, recipient_role={:?}",
             peer_addr,
             msg.type_.to_native(),
@@ -98,10 +107,11 @@ pub async fn run_worker(ctx: Context) -> Result<()> {
             }
             #[cfg(not(feature = "multi-writer"))]
             Ok(AbdRole::Client) => {
-                node::handle_proxy_ack(&ctx, msg).await;
+                // TODO: handle error
+                let _ = node::handle_proxy_ack(&ctx, msg).await;
             }
             _ => {
-                debug!("Invalid recipient role: {}", msg.recipient_role.to_native());
+                warn!("Invalid recipient role: {}", msg.recipient_role.to_native());
             }
         }
     }

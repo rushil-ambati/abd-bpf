@@ -8,7 +8,7 @@
 use std::process;
 
 use abd_userspace::{AbdNode, Config};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use env_logger::Env;
 
@@ -16,7 +16,7 @@ use env_logger::Env;
 #[derive(Parser, Debug)]
 #[command(
     name = "abd-userspace",
-    about = "Userspace implementation of ABD consensus protocol",
+    about = "Userspace implementation of ABD protocol",
     version = env!("CARGO_PKG_VERSION"),
     author = "ABD Project"
 )]
@@ -59,33 +59,60 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Initialize logging
+    // Initialize logging first so we can log errors properly
     let log_level = if args.verbose {
         "debug"
     } else {
         &args.log_level
     };
 
-    env_logger::Builder::from_env(Env::default().default_filter_or(log_level)).init();
+    if let Err(e) =
+        env_logger::Builder::from_env(Env::default().default_filter_or(log_level)).try_init()
+    {
+        eprintln!("Failed to initialize logger: {e}");
+        process::exit(1);
+    }
 
-    // Run the ABD node
+    // Run the ABD node with comprehensive error handling
     if let Err(e) = run_node(args).await {
         log::error!("ABD node failed: {e}");
+        // Log the error chain for better debugging
+        let mut source = e.source();
+        while let Some(err) = source {
+            log::error!("Caused by: {err}");
+            source = err.source();
+        }
         process::exit(1);
     }
 }
 
 async fn run_node(args: Args) -> Result<()> {
-    // Load configuration
-    let config = Config::from_file(&args.config)?;
+    // Validate node_id early
+    if args.node_id == 0 {
+        anyhow::bail!("Node ID must be greater than 0 (1-based indexing)");
+    }
+
+    // Load configuration with better error context
+    let config = Config::from_file(&args.config)
+        .with_context(|| format!("Failed to load configuration from '{}'", args.config))?;
+
+    // Validate node_id against config
+    if args.node_id > config.num_nodes() {
+        anyhow::bail!(
+            "Node ID {} exceeds maximum nodes {} in configuration",
+            args.node_id,
+            config.num_nodes()
+        );
+    }
 
     log::info!(
         "Loaded cluster configuration with {} nodes",
         config.num_nodes()
     );
 
-    // Create and run the ABD node
-    let node = AbdNode::new(args.node_id, config)?;
+    // Create ABD node with better error context
+    let node = AbdNode::new(args.node_id, config)
+        .with_context(|| format!("Failed to create ABD node with ID {}", args.node_id))?;
 
     log::info!(
         "Starting ABD node {} in {} mode",
@@ -97,7 +124,22 @@ async fn run_node(args: Args) -> Result<()> {
         }
     );
 
-    node.run().await?;
+    // Set up graceful shutdown handling
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C signal handler");
+        log::info!("Received shutdown signal, stopping node...");
+    };
 
-    Ok(())
+    // Run node with graceful shutdown
+    tokio::select! {
+        result = node.run() => {
+            result.with_context(|| format!("ABD node {} execution failed", args.node_id))
+        }
+        () = shutdown_signal => {
+            log::info!("Node {} shutdown completed", args.node_id);
+            Ok(())
+        }
+    }
 }

@@ -2,7 +2,7 @@
 name = "abd-userspace"
 version = "0.1.0"
 edition = "2021"
-description = "Userspace implementation of ABD (Attiya, Bar-Noy, Dolev) consensus protocol"
+description = "Userspace implementation of ABD (Attiya, Bar-Noy, Dolev) protocol"
 authors = ["ABD Project"]
 license = "MIT OR Apache-2.0"
 
@@ -17,7 +17,8 @@ log = { workspace = true }
 num_cpus = { workspace = true }
 rkyv = { workspace = true, default-features = true }
 socket2 = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+thiserror = "1.0"
+tokio = { workspace = true, features = ["full", "signal"] }
 
 [features]
 default = ["multi-writer"]
@@ -25,4 +26,4 @@ multi-writer = []
 
 [[bin]]
 name = "abd-userspace"
-path = "src/bin/main.rs"
+path = "src/bin/fast.rs"

@@ -248,7 +248,7 @@ def launch_nodes(num_nodes: int, userspace: bool, target_dir: Path):
             "-E",
             "bash",
             "-c",
-            f"RUST_LOG=warn {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
+            f"RUST_LOG=debug {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
         )
 
 

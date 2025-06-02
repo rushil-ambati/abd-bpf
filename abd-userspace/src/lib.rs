@@ -1,7 +1,7 @@
 //! # ABD Userspace Implementation
 //!
 //! This crate provides a userspace implementation of the ABD (Attiya, Bar-Noy, Dolev)
-//! consensus protocol that is behaviorally identical to the in-kernel eBPF reference implementation.
+//! protocol that is behaviorally identical to the in-kernel eBPF reference implementation.
 //!
 //! ## Features
 //!
@@ -33,6 +33,7 @@
 //! }
 //! ```
 
+pub mod error;
 pub mod network;
 pub mod node;
 pub mod protocol;
@@ -40,7 +41,7 @@ pub mod server;
 
 use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 pub use protocol::{Config, Majority, NodeId};
 use tokio::task::JoinSet;
 
@@ -57,9 +58,9 @@ impl AbdNode {
         if !(1..=config.num_nodes()).contains(&node_id) {
             anyhow::bail!("node_id must be in range 1..={}", config.num_nodes());
         }
-
-        let bind_addr = config.node_address(node_id)?;
-
+        let bind_addr = config
+            .node_address(node_id)
+            .with_context(|| format!("Failed to get bind address for node_id {node_id}"))?;
         Ok(Self {
             node_id,
             config,
@@ -71,7 +72,11 @@ impl AbdNode {
     pub async fn run(self) -> Result<()> {
         let mut workers = JoinSet::new();
         let protocol_state = Arc::new(protocol::GlobalState::new());
-        let peers = Arc::new(self.config.all_addresses()?);
+        let peers = Arc::new(
+            self.config
+                .all_addresses()
+                .with_context(|| "Failed to get all peer addresses")?,
+        );
 
         // Create one worker per CPU core for optimal performance
         for core_id in 0..num_cpus::get() {
@@ -81,7 +86,8 @@ impl AbdNode {
                 peers.clone(),
                 self.bind_addr,
                 protocol_state.clone(),
-            )?;
+            )
+            .with_context(|| format!("Failed to create protocol context for worker #{core_id}"))?;
 
             workers.spawn(async move {
                 if let Err(e) = network::run_worker(ctx).await {

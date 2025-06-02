@@ -1,7 +1,7 @@
 //! Core ABD protocol definitions and state management
 //!
 //! This module contains the fundamental types and state structures that implement
-//! the ABD consensus protocol, including message handling, tag management, and
+//! the ABD protocol, including message handling, tag management, and
 //! state machine coordination.
 
 use std::{
@@ -253,7 +253,8 @@ impl Context {
 
     /// Check if this node is a writer in the current configuration
     #[cfg(not(feature = "multi-writer"))]
-    pub fn is_writer(&self) -> bool {
+    #[must_use]
+    pub const fn is_writer(&self) -> bool {
         self.node_id == 1
     }
 
@@ -275,10 +276,7 @@ impl Context {
     /// Broadcast a message to all peer nodes
     pub async fn broadcast(&self, msg: &ArchivedAbdMessage) -> Result<()> {
         for &peer_addr in self.peers.iter() {
-            // Don't send to ourselves
-            if peer_addr != self.peers[(self.node_id - 1) as usize] {
-                self.send_to_peer(msg, peer_addr).await?;
-            }
+            self.send_to_peer(msg, peer_addr).await?;
         }
         Ok(())
     }

@@ -12,11 +12,11 @@ use std::net::SocketAddr;
 
 use abd_common::{
     message::{AbdMessageType, AbdRole, ArchivedAbdMessage},
-    tag::{self, AbdTag},
+    tag,
 };
 use log::{debug, warn};
 
-use crate::protocol::Context;
+use crate::{error::AbdError, protocol::Context};
 
 /// Handle incoming message directed to server role
 pub async fn handle_message(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_addr: SocketAddr) {
@@ -29,17 +29,19 @@ pub async fn handle_message(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_ad
         return;
     };
 
-    let sender_role = if let Ok(AbdRole::Reader | AbdRole::Writer) =
-        AbdRole::try_from(msg.sender_role.to_native())
-    {
-        AbdRole::try_from(msg.sender_role.to_native()).unwrap()
-    } else {
-        warn!(
-            "Invalid sender role from {}: {}",
-            peer_addr,
-            msg.sender_role.to_native()
-        );
-        return;
+    let sender_role = match AbdRole::try_from(msg.sender_role.to_native()) {
+        Ok(role @ (AbdRole::Reader | AbdRole::Writer)) => role,
+        Ok(other) => {
+            warn!("Unexpected sender role from {peer_addr}: {other:?}");
+            return;
+        }
+        Err(()) => {
+            warn!(
+                "Invalid sender role from {peer_addr}: {}",
+                msg.sender_role.to_native()
+            );
+            return;
+        }
     };
 
     let sender_id = msg.sender_id.to_native();
@@ -60,8 +62,16 @@ pub async fn handle_message(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_ad
     }
 
     match msg_type {
-        AbdMessageType::Read => handle_read_request(ctx, msg, peer_addr).await,
-        AbdMessageType::Write => handle_write_request(ctx, msg, peer_addr).await,
+        AbdMessageType::Read => {
+            if let Err(e) = handle_read_request(ctx, msg, peer_addr).await {
+                warn!("Error handling READ request: {e}");
+            }
+        }
+        AbdMessageType::Write => {
+            if let Err(e) = handle_write_request(ctx, msg, peer_addr).await {
+                warn!("Error handling WRITE request: {e}");
+            }
+        }
         _ => {
             debug!("Unexpected message type for server: {msg_type:?}");
         }
@@ -71,7 +81,11 @@ pub async fn handle_message(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_ad
 /// Handle READ request from a reader node
 ///
 /// Protocol: Return current stored (tag, data) pair to the requesting reader
-async fn handle_read_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_addr: SocketAddr) {
+async fn handle_read_request(
+    ctx: &Context,
+    msg: &mut ArchivedAbdMessage,
+    peer_addr: SocketAddr,
+) -> Result<(), AbdError> {
     debug!("Handling READ request from {peer_addr}");
 
     // Get current stored value
@@ -87,10 +101,10 @@ async fn handle_read_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_a
 
     // Send response
     if let Err(e) = ctx.send_to_peer(msg, peer_addr).await {
-        warn!("Failed to send READ ACK to {peer_addr}: {e}");
-    } else {
-        debug!("Sent READ-ACK to {peer_addr}");
+        return Err(AbdError::network("Failed to send READ ACK", e));
     }
+    debug!("Sent READ-ACK to {peer_addr}");
+    Ok(())
 }
 
 /// Handle WRITE request from a writer node
@@ -99,17 +113,24 @@ async fn handle_read_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_a
 /// 1. Compare incoming tag with stored tag
 /// 2. If incoming tag is greater, update stored value
 /// 3. Send WRITE-ACK with the max tag back to writer
-async fn handle_write_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_addr: SocketAddr) {
+async fn handle_write_request(
+    ctx: &Context,
+    msg: &mut ArchivedAbdMessage,
+    peer_addr: SocketAddr,
+) -> Result<(), AbdError> {
     debug!("Handling WRITE request from {peer_addr}");
 
-    let incoming_tag = AbdTag::from(msg.tag.to_native());
+    let incoming_tag = msg.tag.to_native();
     let stored = ctx.state.server.get_value().await;
 
     // If incoming tag is greater or equal, update our stored value
     let new_tag = if tag::gt(incoming_tag, stored.tag) {
         debug!(
-            "Updating stored value: tag {} -> {}",
-            stored.tag, incoming_tag
+            "Updating stored value: tag <{},{}> -> <{},{}>",
+            tag::seq(stored.tag),
+            tag::wid(stored.tag),
+            tag::seq(incoming_tag),
+            tag::wid(incoming_tag)
         );
         ctx.state
             .server
@@ -118,8 +139,11 @@ async fn handle_write_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_
         incoming_tag
     } else {
         debug!(
-            "Keeping existing value: incoming tag {} <= stored tag {}",
-            incoming_tag, stored.tag
+            "Keeping existing value: incoming tag <{},{}> <= stored tag <{},{}>",
+            tag::seq(incoming_tag),
+            tag::wid(incoming_tag),
+            tag::seq(stored.tag),
+            tag::wid(stored.tag)
         );
         stored.tag // Use existing tag
     };
@@ -133,8 +157,12 @@ async fn handle_write_request(ctx: &Context, msg: &mut ArchivedAbdMessage, peer_
 
     // Send response
     if let Err(e) = ctx.send_to_peer(msg, peer_addr).await {
-        warn!("Failed to send write ACK to {peer_addr}: {e}");
-    } else {
-        debug!("Sent WRITE-ACK to {peer_addr} with tag {new_tag}");
+        return Err(AbdError::network("Failed to send WRITE ACK", e));
     }
+    debug!(
+        "Sent WRITE-ACK to {peer_addr} with tag <{},{}>",
+        tag::seq(new_tag),
+        tag::wid(new_tag)
+    );
+    Ok(())
 }

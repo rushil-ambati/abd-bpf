@@ -21,4 +21,4 @@ tokio = { workspace = true, features = ["full"] }
 
 [[bin]]
 name = "bench"
-path = "src/main.rs"
+path = "src/bin/main.rs"
