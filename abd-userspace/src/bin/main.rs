@@ -21,7 +21,7 @@ use env_logger::Env;
     author = "ABD Project"
 )]
 struct Args {
-    /// Node ID (1-based, must be in range 1..=num_nodes from config)
+    /// Node ID (1-based, must be in range `1..=num_nodes` from config)
     #[arg(
         long,
         value_name = "ID",
@@ -70,7 +70,7 @@ async fn main() {
 
     // Run the ABD node
     if let Err(e) = run_node(args).await {
-        log::error!("ABD node failed: {}", e);
+        log::error!("ABD node failed: {e}");
         process::exit(1);
     }
 }

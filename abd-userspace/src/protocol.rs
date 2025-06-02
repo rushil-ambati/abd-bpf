@@ -29,6 +29,7 @@ pub type NodeId = u32;
 /// Calculate majority threshold for ABD protocol: ceil(n/2)
 /// This matches the eBPF implementation exactly
 #[inline(always)]
+#[must_use]
 pub const fn majority(n: u32) -> u32 {
     (n >> 1) + 1
 }
@@ -50,7 +51,8 @@ impl Config {
     }
 
     /// Get the total number of nodes in the cluster
-    pub fn num_nodes(&self) -> u32 {
+    #[must_use]
+    pub const fn num_nodes(&self) -> u32 {
         self.inner.num_nodes
     }
 
@@ -92,12 +94,12 @@ pub struct TaggedData {
 /// Server replica state that mirrors the eBPF server maps
 #[derive(Default, Debug)]
 pub struct ReplicaStore {
-    /// Freshness counters by (sender_role, sender_id) to prevent replay attacks
-    /// This directly mirrors the server_counters BPF map
+    /// Freshness counters by (`sender_role`, `sender_id`) to prevent replay attacks
+    /// This directly mirrors the `server_counters` BPF map
     counters: RwLock<HashMap<(AbdRole, u32), u64>>,
 
     /// Current stored value with its associated tag
-    /// This mirrors the server_store BPF map
+    /// This mirrors the `server_store` BPF map
     value: Mutex<TaggedData>,
 }
 
@@ -139,7 +141,7 @@ impl ReplicaStore {
 }
 
 /// Node state for reader/writer operations
-/// This mirrors the node_state BPF maps
+/// This mirrors the `node_state` BPF maps
 #[derive(Default, Debug)]
 pub struct NodeState {
     /// Current operation phase:
@@ -204,6 +206,7 @@ pub struct GlobalState {
 }
 
 impl GlobalState {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -218,7 +221,7 @@ pub struct Context {
     /// Total number of replicas in the cluster
     pub num_replicas: u32,
 
-    /// Addresses of all peer nodes (index = node_id - 1)
+    /// Addresses of all peer nodes (index = `node_id` - 1)
     pub peers: Arc<Vec<SocketAddr>>,
 
     /// UDP socket for communication
@@ -230,7 +233,7 @@ pub struct Context {
 
 impl Context {
     /// Create a new protocol context
-    pub async fn new(
+    pub fn new(
         node_id: NodeId,
         num_replicas: u32,
         peers: Arc<Vec<SocketAddr>>,
@@ -255,7 +258,8 @@ impl Context {
     }
 
     #[cfg(feature = "multi-writer")]
-    pub fn is_writer(&self) -> bool {
+    #[must_use]
+    pub const fn is_writer(&self) -> bool {
         true
     }
 

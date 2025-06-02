@@ -81,12 +81,11 @@ impl AbdNode {
                 peers.clone(),
                 self.bind_addr,
                 protocol_state.clone(),
-            )
-            .await?;
+            )?;
 
             workers.spawn(async move {
                 if let Err(e) = network::run_worker(ctx).await {
-                    log::warn!("Worker #{} terminated: {}", core_id, e);
+                    log::warn!("Worker #{core_id} terminated: {e}");
                 }
             });
         }

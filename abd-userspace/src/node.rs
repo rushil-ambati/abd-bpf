@@ -32,12 +32,9 @@ pub async fn handle_reader_message(
     msg: &mut ArchivedAbdMessage,
     peer_addr: SocketAddr,
 ) {
-    let msg_type = match AbdMessageType::try_from(msg.type_.to_native()) {
-        Ok(t) => t,
-        Err(_) => {
-            warn!("Invalid message type: {}", msg.type_.to_native());
-            return;
-        }
+    let Ok(msg_type) = AbdMessageType::try_from(msg.type_.to_native()) else {
+        warn!("Invalid message type: {}", msg.type_.to_native());
+        return;
     };
 
     match msg_type {
@@ -45,7 +42,7 @@ pub async fn handle_reader_message(
         AbdMessageType::ReadAck => handle_read_ack(ctx, msg, AbdRole::Reader).await,
         AbdMessageType::WriteAck => handle_write_ack(ctx, msg, AbdRole::Reader).await,
         _ => {
-            debug!("Unexpected message type for reader: {:?}", msg_type);
+            debug!("Unexpected message type for reader: {msg_type:?}");
         }
     }
 }
@@ -56,12 +53,9 @@ pub async fn handle_writer_message(
     msg: &mut ArchivedAbdMessage,
     peer_addr: SocketAddr,
 ) {
-    let msg_type = match AbdMessageType::try_from(msg.type_.to_native()) {
-        Ok(t) => t,
-        Err(_) => {
-            warn!("Invalid message type: {}", msg.type_.to_native());
-            return;
-        }
+    let Ok(msg_type) = AbdMessageType::try_from(msg.type_.to_native()) else {
+        warn!("Invalid message type: {}", msg.type_.to_native());
+        return;
     };
 
     match msg_type {
@@ -69,20 +63,20 @@ pub async fn handle_writer_message(
         AbdMessageType::ReadAck => handle_read_ack(ctx, msg, AbdRole::Writer).await,
         AbdMessageType::WriteAck => handle_write_ack(ctx, msg, AbdRole::Writer).await,
         _ => {
-            debug!("Unexpected message type for writer: {:?}", msg_type);
+            debug!("Unexpected message type for writer: {msg_type:?}");
         }
     }
 }
 
 /// Handle READ request from client
 async fn handle_client_read(ctx: &Context, msg: &mut ArchivedAbdMessage, client_addr: SocketAddr) {
-    info!("Starting READ operation for client {}", client_addr);
+    info!("Starting READ operation for client {client_addr}");
 
     let state = &ctx.state.reader;
 
     // Check if already busy
     if state.phase.load(Ordering::Acquire) != 0 {
-        debug!("Reader busy, dropping request from {}", client_addr);
+        debug!("Reader busy, dropping request from {client_addr}");
         return;
     }
 
@@ -102,7 +96,7 @@ async fn handle_client_read(ctx: &Context, msg: &mut ArchivedAbdMessage, client_
 
     // Broadcast to all servers
     if let Err(e) = ctx.broadcast(msg).await {
-        warn!("Failed to broadcast READ: {}", e);
+        warn!("Failed to broadcast READ: {e}");
         state.reset().await;
     } else {
         debug!("Broadcasted READ query to all servers");
@@ -118,13 +112,13 @@ async fn handle_client_write(ctx: &Context, msg: &mut ArchivedAbdMessage, client
         return;
     }
 
-    info!("Starting WRITE operation for client {}", client_addr);
+    info!("Starting WRITE operation for client {client_addr}");
 
     let state = &ctx.state.writer;
 
     // Check if already busy
     if state.phase.load(Ordering::Acquire) != 0 {
-        debug!("Writer busy, dropping request from {}", client_addr);
+        debug!("Writer busy, dropping request from {client_addr}");
         return;
     }
 
@@ -153,7 +147,7 @@ async fn handle_client_write(ctx: &Context, msg: &mut ArchivedAbdMessage, client
 
     // Broadcast to all servers
     if let Err(e) = ctx.broadcast(msg).await {
-        warn!("Failed to broadcast READ for write: {}", e);
+        warn!("Failed to broadcast READ for write: {e}");
         state.reset().await;
     } else {
         debug!("Broadcasted read query for write operation");
@@ -214,11 +208,9 @@ async fn handle_read_ack(ctx: &Context, msg: &mut ArchivedAbdMessage, role: AbdR
     *state.tag.lock().await = prop_tag;
 
     // Get data to propagate
-    let data_to_send = if role == AbdRole::Reader {
-        state.data.lock().await.clone() // Readers propagate what they received
-    } else {
-        state.data.lock().await.clone() // Writers propagate original client data
-    };
+    // Readers propagate what they received
+    // Writers propagate original client data
+    let data_to_send = state.data.lock().await.clone();
 
     // Prepare WRITE message for propagation
     msg.counter = counter.into();
@@ -230,11 +222,11 @@ async fn handle_read_ack(ctx: &Context, msg: &mut ArchivedAbdMessage, role: AbdR
     msg.type_ = (AbdMessageType::Write as u32).into();
 
     // Broadcast to all servers
-    if let Err(e) = ctx.broadcast(&msg).await {
-        warn!("Failed to broadcast WRITE: {}", e);
+    if let Err(e) = ctx.broadcast(msg).await {
+        warn!("Failed to broadcast WRITE: {e}");
         state.reset().await;
     } else {
-        debug!("Broadcasted write with tag {} for propagation", prop_tag);
+        debug!("Broadcasted write with tag {prop_tag} for propagation");
     }
 }
 
@@ -262,7 +254,8 @@ async fn handle_write_ack(ctx: &Context, msg: &mut ArchivedAbdMessage, role: Abd
     state.phase.store(0, Ordering::Release);
 
     // Send response to client
-    if let Some(client_addr) = state.client.lock().await.take() {
+    let value = state.client.lock().await.take();
+    if let Some(client_addr) = value {
         let data = state.data.lock().await.clone();
         let final_tag = *state.tag.lock().await;
 
@@ -279,8 +272,8 @@ async fn handle_write_ack(ctx: &Context, msg: &mut ArchivedAbdMessage, role: Abd
         }
         .into();
 
-        if let Err(e) = ctx.send_to_peer(&msg, client_addr).await {
-            warn!("Failed to send response to client {}: {}", client_addr, e);
+        if let Err(e) = ctx.send_to_peer(msg, client_addr).await {
+            warn!("Failed to send response to client {client_addr}: {e}");
         } else {
             info!(
                 "Completed {} operation for client {}",

@@ -50,7 +50,7 @@ struct LatencyOpts {
     config: String,
 
     /// Number of iterations per operation
-    #[arg(long, default_value = "10000")]
+    #[arg(long, default_value = "1000")]
     iterations: u32,
 
     /// Output file for results

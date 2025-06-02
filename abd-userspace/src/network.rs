@@ -13,7 +13,7 @@ use tokio::net::UdpSocket;
 
 use crate::{node, protocol::Context, server};
 
-/// Create a new UDP socket with SO_REUSEPORT for load balancing across cores
+/// Create a new UDP socket with `SO_REUSEPORT` for load balancing across cores
 pub fn create_socket(bind_addr: SocketAddr) -> Result<UdpSocket> {
     use socket2::{Domain, Socket, Type};
 
@@ -40,7 +40,7 @@ pub async fn send_message(
     peer_addr: SocketAddr,
 ) -> Result<()> {
     // Convert message to bytes for transmission
-    let ptr = msg as *const ArchivedAbdMessage as *const u8;
+    let ptr = std::ptr::from_ref::<ArchivedAbdMessage>(msg).cast::<u8>();
     let len = core::mem::size_of::<ArchivedAbdMessage>();
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len) };
 
@@ -54,7 +54,7 @@ pub async fn send_message(
 ///
 /// This is the core receive loop that:
 /// 1. Receives UDP packets from the socket
-/// 2. Deserializes them into ArchivedAbdMessage
+/// 2. Deserializes them into `ArchivedAbdMessage`
 /// 3. Dispatches to the appropriate handler based on recipient role
 /// 4. Implements "busy => drop" semantics identical to eBPF
 pub async fn run_worker(ctx: Context) -> Result<()> {
@@ -73,7 +73,7 @@ pub async fn run_worker(ctx: Context) -> Result<()> {
         {
             Ok(msg) => msg.unseal(),
             Err(e) => {
-                warn!("Failed to deserialize message from {}: {}", peer_addr, e);
+                warn!("Failed to deserialize message from {peer_addr}: {e}");
                 continue;
             }
         };
