@@ -26,4 +26,4 @@ multi-writer = []
 
 [[bin]]
 name = "abd-userspace"
-path = "src/bin/fast.rs"
+path = "src/bin/main.rs"
