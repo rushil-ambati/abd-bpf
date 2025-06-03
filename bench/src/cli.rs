@@ -112,7 +112,7 @@ pub struct ThroughputArgs {
     ///
     /// Higher thread counts can increase throughput but may also increase
     /// contention and reduce individual thread performance.
-    #[arg(long, default_value = "4", value_name = "COUNT")]
+    #[arg(long, default_value = "1", value_name = "COUNT")]
     pub threads_per_node: usize,
 
     /// Request timeout in milliseconds
@@ -124,9 +124,51 @@ pub struct ThroughputArgs {
 
     /// Ramp-up duration in seconds
     ///
-    /// Reserved for future implementation of gradual load increase.
-    #[arg(long, default_value = "5", value_name = "SECONDS")]
+    /// Gradual load increase to avoid overwhelming the system.
+    #[arg(long, default_value = "0", value_name = "SECONDS")]
     pub ramp_up: u64,
+
+    /// Ratio of write operations (0.0 to 1.0)
+    ///
+    /// Controls the mix of write vs read operations, e.g. 0.1 means 10% writes, 90% reads.
+    #[arg(long, default_value = "0.1", value_name = "RATIO")]
+    pub write_ratio: f64,
+
+    /// Maximum in-flight requests per thread
+    ///
+    /// Limits concurrent requests to prevent buffer overflows and enable fair comparisons.
+    #[arg(long, default_value = "16", value_name = "COUNT")]
+    pub max_in_flight: usize,
+
+    /// Load sweep mode: test multiple load levels
+    ///
+    /// When enabled, automatically sweeps through load levels from start_rps to max_rps.
+    #[arg(long)]
+    pub sweep_load: bool,
+
+    /// Starting RPS for load sweep
+    #[arg(long, default_value = "1000", value_name = "RPS")]
+    pub start_rps: u64,
+
+    /// Maximum RPS for load sweep
+    #[arg(long, default_value = "5000", value_name = "RPS")]
+    pub max_rps: u64,
+
+    /// RPS increment for load sweep
+    #[arg(long, default_value = "500", value_name = "RPS")]
+    pub rps_step: u64,
+
+    /// Target RPS for fixed-rate mode (alternative to max throughput)
+    ///
+    /// When set, threads will pace requests to achieve this target rate.
+    #[arg(long, value_name = "RPS")]
+    pub target_rps: Option<u64>,
+
+    /// Temporal resolution for RPS tracking (seconds)
+    ///
+    /// Track per-interval RPS to reveal jitter and performance cliffs.
+    #[arg(long, default_value = "1", value_name = "SECONDS")]
+    pub rps_interval: u64,
 
     /// Output file for results (JSON format)
     ///

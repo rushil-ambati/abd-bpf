@@ -229,4 +229,84 @@ mod tests {
         assert_eq!(format_duration(1500.0), "1.50ms");
         assert_eq!(format_duration(1_500_000.0), "1.50s");
     }
+
+    #[test]
+    fn test_build_latency_stats() {
+        let latencies = vec![100.0, 200.0, 150.0, 300.0, 250.0];
+        let stats = build_latency_stats(&latencies);
+        assert_eq!(stats.sample_count, 5);
+        assert!(stats.avg_us > 0.0);
+        assert!(stats.p95_us >= stats.p50_us);
+    }
+}
+
+/// Builds latency statistics from a collection of latency samples
+///
+/// # Arguments
+///
+/// * `latencies` - Vector of latency values in microseconds
+///
+/// # Returns
+///
+/// Returns LatencyUnderLoad statistics
+pub fn build_latency_stats(latencies: &[f64]) -> crate::types::LatencyUnderLoad {
+    if latencies.is_empty() {
+        return crate::types::LatencyUnderLoad::default();
+    }
+
+    crate::types::LatencyUnderLoad {
+        avg_us: calculate_average(latencies),
+        p50_us: calculate_percentile(latencies, 50.0),
+        p95_us: calculate_percentile(latencies, 95.0),
+        p99_us: calculate_percentile(latencies, 99.0),
+        max_us: latencies.iter().fold(0.0f64, |a, &b| a.max(b)),
+        sample_count: latencies.len() as u64,
+    }
+}
+
+/// Gets system information for benchmark metadata
+pub fn get_system_info() -> crate::types::SystemInfo {
+    crate::types::SystemInfo {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        cpu_cores: num_cpus::get() as u32,
+        memory_mb: get_total_memory_mb(),
+    }
+}
+
+/// Gets total system memory in MB (best effort)
+fn get_total_memory_mb() -> u64 {
+    // This is a simple implementation, could be enhanced with sysinfo crate
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+            for line in contents.lines() {
+                if line.starts_with("MemTotal:") {
+                    if let Some(kb_str) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb_str.parse::<u64>() {
+                            return kb / 1024; // Convert KB to MB
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0 // Unknown/fallback
+}
+
+/// Gets git commit hash if available
+pub fn get_git_commit() -> Option<String> {
+    std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
 }

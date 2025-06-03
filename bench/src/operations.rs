@@ -308,3 +308,91 @@ pub fn perform_write_operation_fast(target_ip: Ipv4Addr, timeout_ms: u64) -> Ben
     validate_write_response(&buf[..n])?;
     Ok(())
 }
+
+/// Performs a fast read operation optimized for throughput benchmarks
+///
+/// This is an optimized version of perform_read_operation that focuses on
+/// speed rather than detailed error reporting.
+///
+/// # Arguments
+///
+/// * `target_ip` - IPv4 address of the target ABD node
+/// * `timeout_ms` - Timeout in milliseconds
+///
+/// # Returns
+///
+/// Returns Ok(()) on successful ReadAck, Err on any failure
+pub fn perform_read_operation_fast(target_ip: Ipv4Addr, timeout_ms: u64) -> BenchmarkResult<()> {
+    // Create ABD read message
+    let msg = AbdMessage::new(
+        0,                         // counter
+        AbdMessageData::default(), // empty data for reads
+        AbdRole::Reader,           // recipient role
+        0,                         // sender_id
+        AbdRole::Client,           // sender role
+        0,                         // tag
+        AbdMessageType::Read,
+    );
+
+    // Serialize message
+    let payload = rkyv::to_bytes::<RkyvError>(&msg).map_err(|e| {
+        BenchmarkError::Serialization(format!("Failed to serialize read message: {}", e))
+    })?;
+
+    // Create socket with timeout
+    let sock = UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| BenchmarkError::Network(format!("Failed to bind UDP socket: {}", e)))?;
+
+    sock.set_read_timeout(Some(Duration::from_millis(timeout_ms)))
+        .map_err(|e| BenchmarkError::Network(format!("Failed to set socket timeout: {}", e)))?;
+
+    let target_addr = SocketAddrV4::new(target_ip, ABD_UDP_PORT);
+
+    // Send request
+    sock.send_to(&payload, target_addr)
+        .map_err(|e| BenchmarkError::Network(format!("Failed to send read request: {}", e)))?;
+
+    // Receive and validate response quickly
+    let mut buf = vec![0u8; 65_535].into_boxed_slice();
+    let (n, _) = sock
+        .recv_from(&mut buf)
+        .map_err(|e| BenchmarkError::Network(format!("Failed to receive read response: {}", e)))?;
+
+    // Quick validation
+    validate_read_response(&buf[..n])?;
+    Ok(())
+}
+
+/// Performs a timed operation (read or write) and returns the latency
+///
+/// Used for latency tracking during throughput benchmarks.
+///
+/// # Arguments
+///
+/// * `target_ip` - IPv4 address of the target ABD node
+/// * `timeout_ms` - Timeout in milliseconds
+/// * `is_write` - True for write operation, false for read operation
+///
+/// # Returns
+///
+/// Returns latency in microseconds on success, Err on any failure
+pub fn perform_timed_operation(
+    target_ip: Ipv4Addr,
+    timeout_ms: u64,
+    is_write: bool,
+) -> BenchmarkResult<f64> {
+    let start = std::time::Instant::now();
+
+    let result = if is_write {
+        perform_write_operation_fast(target_ip, timeout_ms)
+    } else {
+        perform_read_operation_fast(target_ip, timeout_ms)
+    };
+
+    let elapsed = start.elapsed();
+
+    match result {
+        Ok(()) => Ok(elapsed.as_secs_f64() * 1_000_000.0), // Convert to microseconds
+        Err(e) => Err(e),
+    }
+}

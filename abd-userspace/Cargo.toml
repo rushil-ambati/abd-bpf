@@ -6,6 +6,10 @@ description = "Userspace implementation of ABD (Attiya, Bar-Noy, Dolev) protocol
 authors = ["ABD Project"]
 license = "MIT OR Apache-2.0"
 
+[features]
+default = []
+multi-writer = []
+
 [dependencies]
 abd-common = { path = "../abd-common" }
 abd = { path = "../abd" }
@@ -19,10 +23,6 @@ rkyv = { workspace = true, default-features = true }
 socket2 = { workspace = true }
 thiserror = "1.0"
 tokio = { workspace = true, features = ["full", "signal"] }
-
-[features]
-default = []
-multi-writer = []
 
 [[bin]]
 name = "abd-userspace"

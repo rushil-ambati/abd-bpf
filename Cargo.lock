@@ -352,6 +352,7 @@ dependencies = [
  "env_logger",
  "log",
  "netns-rs",
+ "num_cpus",
  "rand",
  "rkyv",
  "serde",
