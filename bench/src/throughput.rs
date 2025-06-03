@@ -84,7 +84,7 @@ pub fn run_throughput_benchmark(opts: &ThroughputArgs) -> BenchmarkResult<Throug
         BenchmarkError::Configuration(format!("Failed to load cluster config: {}", e))
     })?;
 
-    let num_nodes = cluster_config.num_nodes;
+    let num_nodes = opts.num_nodes;
     info!(
         "Starting throughput benchmark with {} nodes, {} threads per node, {}s duration",
         num_nodes, opts.threads_per_node, opts.duration
@@ -162,10 +162,7 @@ pub fn run_throughput_benchmark(opts: &ThroughputArgs) -> BenchmarkResult<Throug
 
     let results = ThroughputResults {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        num_nodes,
-        threads_per_node: opts.threads_per_node,
-        duration_secs: opts.duration,
-        timeout_ms: opts.timeout_ms,
+        args: opts.clone(),
         stats: thread_stats,
         summary,
     };

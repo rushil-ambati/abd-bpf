@@ -8,15 +8,21 @@ veth pairs, configuration file generation, node launching, and test/benchmark
 execution.
 
 Usage:
-    python3 scripts/run.py [-s NUM_NODES] [-d] [-w] [-u] [test|bench [latency|throughput]]
+    python3 scripts/run.py [-n NUM_NODES] [-d] [-w] [-u] [test|bench [latency|throughput]]
 
 Options:
-    -s NUM_NODES   Number of replica nodes (default: 3)
+    -n NUM_NODES   Number of replica nodes (default: 3)
     -d             Use debug build
     -w             Wait for background services after client finishes
     -u             Use userspace implementation instead of eBPF
     test           Run the test scenario (default)
     bench          Run the benchmark (latency or throughput)
+
+Environment Variables for Benchmarks:
+    Environment variables with the ABD_BENCH_ prefix are converted to CLI arguments, e.g.
+        ABD_BENCH_ITERATIONS=1000       → --iterations 1000
+
+    This allows flexible configuration without modifying the script.
 
 This script requires sudo privileges for network namespace operations.
 """
@@ -89,10 +95,11 @@ signal.signal(signal.SIGTERM, cleanup)
 
 
 def parse_args():
-    """Parse command-line arguments."""
+    """Parse command-line arguments, supporting environment variables as fallback."""
     parser = argparse.ArgumentParser(description="ABD cluster orchestrator")
     parser.add_argument(
-        "-s",
+        "-n",
+        "--num-nodes",
         type=int,
         default=3,
         dest="num_nodes",
@@ -101,12 +108,14 @@ def parse_args():
     parser.add_argument("-d", action="store_true", dest="debug", help="Use debug build")
     parser.add_argument(
         "-w",
+        "--wait",
         action="store_true",
         dest="wait",
         help="Wait for background services after client finishes",
     )
     parser.add_argument(
         "-u",
+        "--userspace",
         action="store_true",
         dest="userspace",
         help="Use userspace implementation instead of eBPF",
@@ -304,9 +313,45 @@ def run_test(num_nodes: int, userspace: bool, target_dir: Path):
             print()
 
 
+def env_to_cli_args(prefix: str = "ABD_BENCH_") -> List[str]:
+    """
+    Convert environment variables to CLI arguments.
+
+    Environment variables with the given prefix are converted to CLI arguments:
+    - ABD_BENCH_CONFIG=file.json → --config file.json
+    - ABD_BENCH_ITERATIONS=1000 → --iterations 1000
+    - ABD_BENCH_THREADS_PER_NODE=4 → --threads-per-node 4
+
+    Args:
+        prefix: Environment variable prefix to look for
+
+    Returns:
+        List of CLI arguments
+    """
+    args = []
+    for key, value in os.environ.items():
+        if key.startswith(prefix):
+            # Remove prefix and convert to kebab-case
+            arg_name = key[len(prefix) :].lower().replace("_", "-")
+            args.extend([f"--{arg_name}", value])
+    return args
+
+
 def run_bench(bench_mode: str, target_dir: Path):
     """Run the benchmark in the specified mode (latency or throughput)."""
     bench_log = LOGS / f"bench_{bench_mode}.log"
+
+    # Build benchmark command with environment-based arguments
+    env_args = env_to_cli_args("ABD_BENCH_")
+
+    # Base command
+    bench_cmd_parts = ["RUST_LOG=info", str(target_dir / "bench"), bench_mode, "--config", str(CONFIG_FILE)]
+
+    # Add environment-based arguments
+    bench_cmd_parts.extend(env_args)
+
+    bench_cmd = " ".join(bench_cmd_parts)
+
     with open(bench_log, "w", encoding="utf-8") as f:
         proc = subprocess.Popen(
             [
@@ -314,7 +359,7 @@ def run_bench(bench_mode: str, target_dir: Path):
                 "-E",
                 "bash",
                 "-c",
-                f"RUST_LOG=info {target_dir}/bench {bench_mode} --config {CONFIG_FILE}",
+                bench_cmd,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

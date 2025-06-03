@@ -74,29 +74,36 @@ class BenchmarkEvaluator:
     def run_benchmark(
         self,
         implementation: str,
-        nodes: int,
-        iterations: int,
-        warmup: int,
         debug: bool = False,
     ) -> Dict:
         """Run benchmark for specified implementation."""
         print(f"\n{'='*60}")
         print(f"Running {implementation.upper()} benchmark...")
-        print(f"Nodes: {nodes}, Iterations: {iterations}, Warmup: {warmup}")
         print(f"{'='*60}")
 
         # Prepare command
-        cmd = ["python3", "scripts/run.py", "-s", str(nodes)]
+        cmd = ["python3", "scripts/run.py"]
         if debug:
             cmd.append("-d")
         if implementation == "userspace":
             cmd.append("-u")
         cmd.extend(["bench", "latency"])
 
-        # Set environment variables for benchmark parameters
+        # Set environment variables for benchmark parameters using the generic prefix
         env = os.environ.copy()
-        env["BENCH_ITERATIONS"] = str(iterations)
-        env["BENCH_WARMUP"] = str(warmup)
+        # Set a unique output filename to avoid conflicts
+        output_filename = f"{implementation}_latency_results.json"
+        env["ABD_BENCH_OUTPUT"] = output_filename
+
+        # Also set ABD_NUM_NODES, ABD_ITERATIONS, etc. from current config if present
+        # CLI flags take precedence, but env vars are fallback
+        # Use self.results or self.analysis_results if config is available
+        # (If you want to pass through config from evaluate.py, set here)
+
+        if debug:
+            env["RUST_LOG"] = "debug"
+        else:
+            env["RUST_LOG"] = "info"
 
         try:
             # Run the benchmark
@@ -121,7 +128,7 @@ class BenchmarkEvaluator:
             print(f"Benchmark completed in {duration:.1f}s")
 
             # Load results
-            results_file = Path("latency_results.json")
+            results_file = Path(output_filename)
             if not results_file.exists():
                 raise FileNotFoundError(f"Results file {results_file} not found")
 
@@ -130,7 +137,7 @@ class BenchmarkEvaluator:
 
             # Archive results
             archive_path = self.data_dir / f"{implementation}_latency_results.json"
-            shutil.copy2(results_file, archive_path)
+            shutil.move(results_file, archive_path)
             print(f"Results archived to {archive_path}")
 
             return data
@@ -609,9 +616,6 @@ class BenchmarkEvaluator:
 
     def run_full_evaluation(
         self,
-        nodes: int,
-        iterations: int,
-        warmup: int,
         debug: bool,
         skip_benchmarks: bool,
     ):
@@ -630,8 +634,8 @@ class BenchmarkEvaluator:
                 return
         else:
             # Run benchmarks
-            ebpf_data = self.run_benchmark("ebpf", nodes, iterations, warmup, debug)
-            userspace_data = self.run_benchmark("userspace", nodes, iterations, warmup, debug)
+            ebpf_data = self.run_benchmark("ebpf", debug)
+            userspace_data = self.run_benchmark("userspace", debug)
 
         # Analyze results
         analysis = self.analyze_results(ebpf_data, userspace_data)
@@ -666,15 +670,12 @@ class BenchmarkEvaluator:
 def main():
     """Main entry point for ABD evaluation script."""
     parser = argparse.ArgumentParser(description="ABD Protocol Evaluation Script")
-    parser.add_argument("--nodes", type=int, default=3, help="Number of nodes")
-    parser.add_argument("--iterations", type=int, default=1000, help="Number of benchmark iterations")
-    parser.add_argument("--warmup", type=int, default=50, help="Number of warmup iterations")
     parser.add_argument("--output", default="evaluation_results", help="Output directory")
     parser.add_argument("--skip-benchmarks", action="store_true", help="Skip running benchmarks")
     parser.add_argument("--debug", action="store_true", help="Use debug build")
     args = parser.parse_args()
     evaluator = BenchmarkEvaluator(args.output)
-    evaluator.run_full_evaluation(args.nodes, args.iterations, args.warmup, args.debug, args.skip_benchmarks)
+    evaluator.run_full_evaluation(args.debug, args.skip_benchmarks)
 
 
 if __name__ == "__main__":

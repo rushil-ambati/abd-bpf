@@ -50,10 +50,8 @@ pub enum BenchmarkError {
 pub struct LatencyResults {
     /// ISO 8601 timestamp of when the benchmark was run
     pub timestamp: String,
-    /// Number of nodes in the cluster
-    pub num_nodes: u32,
-    /// Number of iterations performed per operation
-    pub iterations: u32,
+    /// Arguments used for this benchmark run
+    pub args: crate::cli::LatencyArgs,
     /// Write latencies per node (node_id -> latencies in microseconds)
     pub write_latencies: HashMap<u32, Vec<f64>>,
     /// Read latencies per node (node_id -> latencies in microseconds)
@@ -105,14 +103,8 @@ pub struct ThreadThroughputStats {
 pub struct ThroughputResults {
     /// ISO 8601 timestamp of when the benchmark was run
     pub timestamp: String,
-    /// Number of nodes in the cluster
-    pub num_nodes: u32,
-    /// Number of threads per node
-    pub threads_per_node: usize,
-    /// Duration of the benchmark in seconds
-    pub duration_secs: u64,
-    /// Request timeout in milliseconds
-    pub timeout_ms: u64,
+    /// Arguments used for this benchmark run
+    pub args: crate::cli::ThroughputArgs,
     /// Per-thread statistics
     pub stats: Vec<ThreadThroughputStats>,
     /// Aggregated summary statistics

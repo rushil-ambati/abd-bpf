@@ -72,7 +72,7 @@ pub fn run_latency_benchmark(opts: &LatencyArgs) -> BenchmarkResult<LatencyResul
         BenchmarkError::Configuration(format!("Failed to load cluster config: {}", e))
     })?;
 
-    let num_nodes = cluster_config.num_nodes;
+    let num_nodes = opts.num_nodes;
     info!(
         "Starting latency benchmark with {} nodes, {} iterations",
         num_nodes, opts.iterations
@@ -102,8 +102,7 @@ pub fn run_latency_benchmark(opts: &LatencyArgs) -> BenchmarkResult<LatencyResul
     // Initialize results structure
     let mut results = LatencyResults {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        num_nodes,
-        iterations: opts.iterations,
+        args: opts.clone(),
         write_latencies: HashMap::new(),
         read_latencies: HashMap::new(),
         summary: LatencySummary::default(),

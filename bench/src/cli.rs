@@ -1,6 +1,7 @@
 //! Command-line interface definitions for the ABD benchmark utility
 
 use clap::{Parser, Subcommand};
+use serde::{Deserialize, Serialize};
 
 /// ABD Benchmark Utility
 ///
@@ -46,7 +47,7 @@ pub enum BenchCommand {
 }
 
 /// Arguments for latency benchmark command
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyArgs {
     /// Path to cluster configuration file (JSON format)
     ///
@@ -54,6 +55,13 @@ pub struct LatencyArgs {
     /// and network interface information.
     #[arg(long, value_name = "FILE")]
     pub config: String,
+
+    /// Number of nodes in the cluster
+    ///
+    /// The number of nodes to include in the benchmark test. This should match
+    /// the number of nodes configured in the cluster configuration file.
+    #[arg(long, default_value = "3", value_name = "COUNT")]
+    pub num_nodes: u32,
 
     /// Number of iterations per operation type
     ///
@@ -77,7 +85,7 @@ pub struct LatencyArgs {
 }
 
 /// Arguments for throughput benchmark command
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone, Serialize, Deserialize)]
 pub struct ThroughputArgs {
     /// Path to cluster configuration file (JSON format)
     ///
@@ -85,6 +93,13 @@ pub struct ThroughputArgs {
     /// and network interface information.
     #[arg(long, value_name = "FILE")]
     pub config: String,
+
+    /// Number of nodes in the cluster
+    ///
+    /// The number of nodes to include in the benchmark test. This should match
+    /// the number of nodes configured in the cluster configuration file.
+    #[arg(long, default_value = "3", value_name = "COUNT")]
+    pub num_nodes: u32,
 
     /// Duration of the benchmark in seconds
     ///
@@ -107,7 +122,7 @@ pub struct ThroughputArgs {
     #[arg(long, default_value = "100", value_name = "MS")]
     pub timeout_ms: u64,
 
-    /// Ramp-up duration in seconds (currently unused)
+    /// Ramp-up duration in seconds
     ///
     /// Reserved for future implementation of gradual load increase.
     #[arg(long, default_value = "5", value_name = "SECONDS")]
