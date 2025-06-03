@@ -12,6 +12,7 @@ logs/
 
 cluster_config.json
 latency_results.json
+throughput_results.json
 evaluation_results/
 
 .venv/

@@ -46,9 +46,7 @@ def run_bg(name: str, *cmd: str) -> subprocess.Popen:
     logfile = LOGS / f"{name}.log"
     with open(logfile, "w", encoding="utf-8") as f:
         # pylint: disable=subprocess-popen-preexec-fn
-        proc = subprocess.Popen(
-            cmd, stdout=f, stderr=subprocess.STDOUT, preexec_fn=os.setpgrp
-        )
+        proc = subprocess.Popen(cmd, stdout=f, stderr=subprocess.STDOUT, preexec_fn=os.setpgrp)
     bg_procs.append(proc)
     return proc
 
@@ -70,9 +68,7 @@ def cleanup(*_):
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:
             try:
-                print(
-                    f"  Escalating to SIGKILL for process group {os.getpgid(proc.pid)} (pid {proc.pid})"
-                )
+                print(f"  Escalating to SIGKILL for process group {os.getpgid(proc.pid)} (pid {proc.pid})")
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except OSError as e:
                 print(f"  Warning: could not SIGKILL process {proc.pid}: {e}")
@@ -197,13 +193,9 @@ def setup_netns(num_nodes: int, userspace: bool, target_dir: Path):
 def get_node_info(i: int) -> dict:
     """Get network and interface info for a node."""
     iface = f"node{i}"
-    link_json = subprocess.check_output(
-        ["ip", "-json", "link", "show", "dev", iface]
-    ).decode()
+    link_json = subprocess.check_output(["ip", "-json", "link", "show", "dev", iface]).decode()
     ifindex = json.loads(link_json)[0]["ifindex"]
-    ip_json = subprocess.check_output(
-        ["ip", "-4", "-json", "addr", "show", "dev", iface]
-    ).decode()
+    ip_json = subprocess.check_output(["ip", "-4", "-json", "addr", "show", "dev", iface]).decode()
     ip = json.loads(ip_json)[0]["addr_info"][0]["local"]
     mac = (
         subprocess.check_output(
@@ -248,7 +240,7 @@ def launch_nodes(num_nodes: int, userspace: bool, target_dir: Path):
             "-E",
             "bash",
             "-c",
-            f"RUST_LOG=debug {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
+            f"RUST_LOG=info {target_dir}/{exe} --node-id {i} --config {CONFIG_FILE}",
         )
 
 
