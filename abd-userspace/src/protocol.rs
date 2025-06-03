@@ -40,7 +40,7 @@ pub struct ReplicaStore {
 
 #[derive(Default)]
 pub struct NodeState {
-    pub phase: AtomicU32,   // 0 idle │ 1 query │ 2 prop │ 3 proxy‑wait
+    pub phase: AtomicU32,   // 0 idle │ 1 query │ 2 prop (3 no longer used)
     pub counter: AtomicU64, // local monotonic per‑op counter
     pub acks: AtomicU32,
     pub tag: Mutex<AbdTag>,
@@ -53,6 +53,8 @@ pub struct GlobalState {
     pub server: ReplicaStore,
     pub reader: NodeState,
     pub writer: NodeState,
+    #[cfg(not(feature = "multi-writer"))]
+    pub proxy_client: Mutex<Option<SocketAddr>>,
 }
 
 #[derive(Clone)]

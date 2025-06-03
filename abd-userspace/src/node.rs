@@ -131,16 +131,22 @@ fn build_write(ctx: &Context, m: &mut ArchivedAbdMessage, tag: u64, counter: u64
     m.tag = tag.into();
 }
 
-// Proxy ‑ forward WRITE to writer#1
+// Proxy ‑ forward WRITE to writer#1 (stateless)
+#[cfg(not(feature = "multi-writer"))]
 async fn proxy_forward(ctx: &Context, msg: &mut ArchivedAbdMessage, client: SocketAddr) {
-    let st = &ctx.state.writer;
-    st.phase.store(3, Ordering::Release);
-    *st.client.lock().await = Some(client);
+    // Store client address for this proxy request
+    *ctx.state.proxy_client.lock().await = Some(client);
 
     msg.sender_id = ctx.id.into(); // proxy id
                                    // sender_role stays Client, recipient_role stays Writer (unchanged)
     let writer = ctx.peers[0]; // node 1
     let _ = send(&ctx.socket, msg, writer).await;
+}
+
+#[cfg(feature = "multi-writer")]
+async fn proxy_forward(_ctx: &Context, _msg: &mut ArchivedAbdMessage, _client: SocketAddr) {
+    // In multi-writer mode, proxy forwarding is not used.
+    warn!("Proxy forwarding is not supported in multi-writer mode");
 }
 
 // READ‑ACK  (phase‑1 → phase‑2)
@@ -234,21 +240,16 @@ async fn on_write_ack(ctx: &Context, msg: &mut ArchivedAbdMessage, role: AbdRole
     }
 }
 
-// PROXY path (single‑writer)
+// PROXY path (single‑writer) - stateless
 #[cfg(not(feature = "multi-writer"))]
 pub async fn proxy_ack(ctx: &Context, msg: &mut ArchivedAbdMessage) {
     if ctx.id == 1 || msg.type_.to_native() != AbdMessageType::WriteAck as u32 {
         return;
     }
-    let st = &ctx.state.writer;
-    if st.phase.load(Ordering::Acquire) != 3 {
-        return;
-    }
-    let value = st.client.lock().await.take();
-    if let Some(client) = value {
-        st.phase.store(0, Ordering::Release);
-        msg.recipient_role = AbdRole::Client.into();
-        msg.sender_role = AbdRole::Writer.into();
-        let _ = send(&ctx.socket, msg, client).await;
+
+    // Check if we have a client waiting for this proxy response
+    let client = ctx.state.proxy_client.lock().await.take();
+    if let Some(client_addr) = client {
+        let _ = send(&ctx.socket, msg, client_addr).await;
     }
 }
