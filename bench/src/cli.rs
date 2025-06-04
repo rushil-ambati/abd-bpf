@@ -147,7 +147,7 @@ pub struct ThroughputArgs {
     pub sweep_load: bool,
 
     /// Starting RPS for load sweep
-    #[arg(long, default_value = "1000", value_name = "RPS")]
+    #[arg(long, default_value = "500", value_name = "RPS")]
     pub start_rps: u64,
 
     /// Maximum RPS for load sweep

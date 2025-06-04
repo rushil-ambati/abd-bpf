@@ -596,7 +596,196 @@ class ThroughputAnalyzer:
         plt.close()
 
     def create_throughput_latency_analysis(self, ebpf_data: Dict, userspace_data: Dict):
-        """Create throughput vs latency analysis."""
+        """Create throughput vs latency analysis with sweep_results support."""
+        # Check if sweep_results data is available for either implementation
+        ebpf_sweep = ebpf_data.get("sweep_results")
+        user_sweep = userspace_data.get("sweep_results")
+
+        has_sweep_data = ebpf_sweep is not None or user_sweep is not None
+
+        if has_sweep_data:
+            # Create comprehensive sweep analysis
+            self._create_sweep_analysis(ebpf_data, userspace_data)
+        else:
+            # Fall back to original single-point analysis
+            self._create_single_point_analysis(ebpf_data, userspace_data)
+
+    def _create_sweep_analysis(self, ebpf_data: Dict, userspace_data: Dict):
+        """Create comprehensive sweep analysis with multiple load levels."""
+        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+        fig.suptitle("Comprehensive Throughput vs Latency Analysis (Load Sweep)", fontsize=16, fontweight="bold")
+
+        ebpf_sweep = ebpf_data.get("sweep_results", [])
+        user_sweep = userspace_data.get("sweep_results", [])
+
+        # 1. Throughput vs Average Latency curves
+        ax1 = axes[0, 0]
+
+        if ebpf_sweep:
+            ebpf_rps = [point["actual_rps"] for point in ebpf_sweep]
+            ebpf_latencies = [point["latency_stats"]["avg_us"] for point in ebpf_sweep]
+            ax1.plot(
+                ebpf_rps,
+                ebpf_latencies,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_rps = [point["actual_rps"] for point in user_sweep]
+            user_latencies = [point["latency_stats"]["avg_us"] for point in user_sweep]
+            ax1.plot(
+                user_rps,
+                user_latencies,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace",
+                linewidth=2,
+                markersize=6,
+            )
+
+        # Add single-point fallback if no sweep data
+        if not ebpf_sweep:
+            ebpf_summary = ebpf_data.get("summary", {})
+            ebpf_rps_single = ebpf_summary.get("rps", 0)
+            ebpf_latency_single = ebpf_summary.get("latency_summary", {}).get("avg_us", 0)
+            ax1.scatter(
+                ebpf_rps_single,
+                ebpf_latency_single,
+                s=100,
+                color=self.config.colors["ebpf"],
+                label="eBPF (single)",
+                marker="o",
+            )
+
+        if not user_sweep:
+            user_summary = userspace_data.get("summary", {})
+            user_rps_single = user_summary.get("rps", 0)
+            user_latency_single = user_summary.get("latency_summary", {}).get("avg_us", 0)
+            ax1.scatter(
+                user_rps_single,
+                user_latency_single,
+                s=100,
+                color=self.config.colors["userspace"],
+                label="Userspace (single)",
+                marker="s",
+            )
+
+        ax1.set_xlabel("Actual Throughput (RPS)")
+        ax1.set_ylabel("Average Latency (μs)")
+        ax1.set_title("Throughput vs Latency Trade-off Curves")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # 2. Success Rate vs Throughput
+        ax2 = axes[0, 1]
+
+        if ebpf_sweep:
+            ebpf_success_rates = [point["success_rate"] * 100 for point in ebpf_sweep]
+            ax2.plot(
+                ebpf_rps,
+                ebpf_success_rates,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_success_rates = [point["success_rate"] * 100 for point in user_sweep]
+            ax2.plot(
+                user_rps,
+                user_success_rates,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace",
+                linewidth=2,
+                markersize=6,
+            )
+
+        ax2.set_xlabel("Actual Throughput (RPS)")
+        ax2.set_ylabel("Success Rate (%)")
+        ax2.set_title("Success Rate vs Throughput")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.set_ylim([90, 100])  # Focus on the relevant range
+
+        # 3. P99 Latency vs Throughput (tail latency under load)
+        ax3 = axes[1, 0]
+
+        if ebpf_sweep:
+            ebpf_p99 = [point["latency_stats"]["p99_us"] for point in ebpf_sweep]
+            ax3.plot(
+                ebpf_rps, ebpf_p99, "o-", color=self.config.colors["ebpf"], label="eBPF P99", linewidth=2, markersize=6
+            )
+
+        if user_sweep:
+            user_p99 = [point["latency_stats"]["p99_us"] for point in user_sweep]
+            ax3.plot(
+                user_rps,
+                user_p99,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace P99",
+                linewidth=2,
+                markersize=6,
+            )
+
+        ax3.set_xlabel("Actual Throughput (RPS)")
+        ax3.set_ylabel("P99 Latency (μs)")
+        ax3.set_title("Tail Latency vs Throughput")
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # 4. Efficiency Analysis: RPS per unit latency
+        ax4 = axes[1, 1]
+
+        if ebpf_sweep:
+            ebpf_efficiency = [rps / max(lat, 1) for rps, lat in zip(ebpf_rps, ebpf_latencies)]
+            ax4.plot(
+                ebpf_rps,
+                ebpf_efficiency,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF Efficiency",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_efficiency = [rps / max(lat, 1) for rps, lat in zip(user_rps, user_latencies)]
+            ax4.plot(
+                user_rps,
+                user_efficiency,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace Efficiency",
+                linewidth=2,
+                markersize=6,
+            )
+
+        ax4.set_xlabel("Actual Throughput (RPS)")
+        ax4.set_ylabel("Efficiency (RPS/μs)")
+        ax4.set_title("Throughput Efficiency vs Load")
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save in multiple formats
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.config.figures_dir / f"throughput_latency_sweep_analysis.{fmt}")
+        plt.close()
+
+        # Create additional detailed sweep metrics
+        self._create_sweep_metrics_analysis(ebpf_data, userspace_data)
+
+    def _create_single_point_analysis(self, ebpf_data: Dict, userspace_data: Dict):
+        """Create original single-point throughput vs latency analysis."""
         fig, axes = plt.subplots(1, 2, figsize=(15, 6))
         fig.suptitle("Throughput vs Latency Analysis", fontsize=16, fontweight="bold")
 
@@ -686,6 +875,221 @@ class ThroughputAnalyzer:
         # Save in multiple formats
         for fmt in ["png", "svg", "pdf"]:
             plt.savefig(self.config.figures_dir / f"throughput_latency_analysis.{fmt}")
+        plt.close()
+
+    def _create_sweep_metrics_analysis(self, ebpf_data: Dict, userspace_data: Dict):
+        """Create detailed metrics analysis for sweep results."""
+        ebpf_sweep = ebpf_data.get("sweep_results", [])
+        user_sweep = userspace_data.get("sweep_results", [])
+
+        if not ebpf_sweep and not user_sweep:
+            return
+
+        fig, axes = plt.subplots(2, 2, figsize=(20, 12))
+        fig.suptitle("Detailed Load Sweep Metrics Analysis", fontsize=16, fontweight="bold")
+
+        # 1. Target vs Actual RPS comparison
+        ax1 = axes[0, 0]
+
+        if ebpf_sweep:
+            ebpf_targets = [point["target_rps"] for point in ebpf_sweep]
+            ebpf_actuals = [point["actual_rps"] for point in ebpf_sweep]
+            ax1.plot(
+                ebpf_targets,
+                ebpf_actuals,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_targets = [point["target_rps"] for point in user_sweep]
+            user_actuals = [point["actual_rps"] for point in user_sweep]
+            ax1.plot(
+                user_targets,
+                user_actuals,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace",
+                linewidth=2,
+                markersize=6,
+            )
+
+        # Add ideal line
+        if ebpf_sweep or user_sweep:
+            all_targets = (ebpf_targets if ebpf_sweep else []) + (user_targets if user_sweep else [])
+            max_target = max(all_targets) if all_targets else 1000
+            ax1.plot([0, max_target], [0, max_target], "--", color="gray", alpha=0.7, label="Ideal (Target=Actual)")
+
+        ax1.set_xlabel("Target RPS")
+        ax1.set_ylabel("Actual RPS")
+        ax1.set_title("Target vs Actual Throughput")
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+
+        # 2. Latency components across load levels
+        ax2 = axes[0, 1]
+
+        if ebpf_sweep:
+            ebpf_p50 = [point["latency_stats"]["p50_us"] for point in ebpf_sweep]
+            ebpf_p95 = [point["latency_stats"]["p95_us"] for point in ebpf_sweep]
+            ebpf_p99 = [point["latency_stats"]["p99_us"] for point in ebpf_sweep]
+
+            ax2.plot(
+                ebpf_actuals,
+                ebpf_p50,
+                "o-",
+                color=self.config.colors["ebpf"],
+                alpha=0.7,
+                label="eBPF P50",
+                linewidth=1.5,
+                markersize=4,
+            )
+            ax2.plot(
+                ebpf_actuals,
+                ebpf_p95,
+                "o-",
+                color=self.config.colors["ebpf"],
+                alpha=0.8,
+                label="eBPF P95",
+                linewidth=2,
+                markersize=5,
+            )
+            ax2.plot(
+                ebpf_actuals,
+                ebpf_p99,
+                "o-",
+                color=self.config.colors["ebpf"],
+                alpha=1.0,
+                label="eBPF P99",
+                linewidth=2.5,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_p50 = [point["latency_stats"]["p50_us"] for point in user_sweep]
+            user_p95 = [point["latency_stats"]["p95_us"] for point in user_sweep]
+            user_p99 = [point["latency_stats"]["p99_us"] for point in user_sweep]
+
+            ax2.plot(
+                user_actuals,
+                user_p50,
+                "s-",
+                color=self.config.colors["userspace"],
+                alpha=0.7,
+                label="Userspace P50",
+                linewidth=1.5,
+                markersize=4,
+            )
+            ax2.plot(
+                user_actuals,
+                user_p95,
+                "s-",
+                color=self.config.colors["userspace"],
+                alpha=0.8,
+                label="Userspace P95",
+                linewidth=2,
+                markersize=5,
+            )
+            ax2.plot(
+                user_actuals,
+                user_p99,
+                "s-",
+                color=self.config.colors["userspace"],
+                alpha=1.0,
+                label="Userspace P99",
+                linewidth=2.5,
+                markersize=6,
+            )
+
+        ax2.set_xlabel("Actual Throughput (RPS)")
+        ax2.set_ylabel("Latency (μs)")
+        ax2.set_title("Latency Percentiles vs Load")
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+
+        # 3. Throughput efficiency degradation
+        ax3 = axes[1, 0]
+
+        if ebpf_sweep:
+            ebpf_efficiency_loss = [
+                (target - actual) / target * 100 for target, actual in zip(ebpf_targets, ebpf_actuals)
+            ]
+            ax3.plot(
+                ebpf_targets,
+                ebpf_efficiency_loss,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_efficiency_loss = [
+                (target - actual) / target * 100 for target, actual in zip(user_targets, user_actuals)
+            ]
+            ax3.plot(
+                user_targets,
+                user_efficiency_loss,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace",
+                linewidth=2,
+                markersize=6,
+            )
+
+        ax3.set_xlabel("Target RPS")
+        ax3.set_ylabel("Efficiency Loss (%)")
+        ax3.set_title("Throughput Efficiency Loss vs Target Load")
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+
+        # 4. Performance envelope comparison
+        ax4 = axes[1, 1]
+
+        # Create performance score: weight success rate and inverse latency
+        if ebpf_sweep:
+            ebpf_scores = [
+                point["success_rate"] * 1000 / max(point["latency_stats"]["avg_us"], 1) for point in ebpf_sweep
+            ]
+            ax4.plot(
+                ebpf_actuals,
+                ebpf_scores,
+                "o-",
+                color=self.config.colors["ebpf"],
+                label="eBPF Performance Score",
+                linewidth=2,
+                markersize=6,
+            )
+
+        if user_sweep:
+            user_scores = [
+                point["success_rate"] * 1000 / max(point["latency_stats"]["avg_us"], 1) for point in user_sweep
+            ]
+            ax4.plot(
+                user_actuals,
+                user_scores,
+                "s-",
+                color=self.config.colors["userspace"],
+                label="Userspace Performance Score",
+                linewidth=2,
+                markersize=6,
+            )
+
+        ax4.set_xlabel("Actual Throughput (RPS)")
+        ax4.set_ylabel("Performance Score (SuccessRate * 1000 / AvgLatency)")
+        ax4.set_title("Overall Performance Score vs Load")
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+        plt.tight_layout()
+
+        # Save in multiple formats
+        for fmt in ["png", "svg", "pdf"]:
+            plt.savefig(self.config.figures_dir / f"throughput_sweep_metrics.{fmt}")
         plt.close()
 
     def create_error_analysis(self, analysis: Dict):
