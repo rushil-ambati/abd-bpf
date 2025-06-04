@@ -102,7 +102,7 @@ class BenchmarkRunner:
             cmd.append("-d")
         if implementation == "userspace":
             cmd.append("-u")
-        cmd.extend(["bench", "latency"])
+        cmd.extend(["bench", "latency", "--num-nodes", str(self.config.num_nodes)])
 
         # Set environment variables
         env = os.environ.copy()
@@ -123,7 +123,7 @@ class BenchmarkRunner:
         logger.info(f"Running throughput benchmark for {implementation} with sweep load testing")
 
         # Prepare command
-        cmd = ["python3", "scripts/run.py"]
+        cmd = ["python3", "scripts/run.py", "--num-nodes", str(self.config.num_nodes)]
         if self.config.debug:
             cmd.append("-d")
         if implementation == "userspace":

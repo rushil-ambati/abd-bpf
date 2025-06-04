@@ -19,6 +19,9 @@ class EvaluationConfig:
     # Directories
     output_dir: Path
 
+    # Number of nodes
+    num_nodes: int = 3
+
     # Benchmark settings
     debug: bool = False
 

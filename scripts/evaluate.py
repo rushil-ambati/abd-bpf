@@ -172,7 +172,12 @@ class ABDEvaluator:
 
 def create_config_from_args(args) -> EvaluationConfig:
     """Create evaluation configuration from command line arguments."""
-    return EvaluationConfig(output_dir=Path(args.output), debug=args.debug, skip_latex=args.skip_latex)
+    return EvaluationConfig(
+        output_dir=Path(args.output),
+        debug=args.debug,
+        skip_latex=args.skip_latex,
+        num_nodes=args.num_nodes if hasattr(args, "num_nodes") else 3,
+    )
 
 
 def main():
@@ -187,6 +192,7 @@ Examples:
   %(prog)s --debug                   # Use debug builds
   %(prog)s --output my_results       # Custom output directory
   %(prog)s --skip-latex              # Disable LaTeX in plots
+  %(prog)s --num-nodes 5             # Use 5 nodes for benchmarking
         """,
     )
 
@@ -199,6 +205,9 @@ Examples:
     parser.add_argument("--debug", action="store_true", help="Use debug builds for benchmarking")
     parser.add_argument(
         "--skip-latex", action="store_true", help="Disable LaTeX rendering in plots (for systems without LaTeX)"
+    )
+    parser.add_argument(
+        "--num-nodes", type=int, default=3, help="Number of nodes to use for benchmarking (default: 3)"
     )
 
     args = parser.parse_args()

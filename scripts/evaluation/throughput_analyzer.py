@@ -282,12 +282,12 @@ class ThroughputAnalyzer:
         )
 
         # Latency comparison
-        latency_improvement = (userspace_summary["avg_latency_us"] - ebpf_summary["avg_latency_us"]) / max(
+        latency_improvement = (ebpf_summary["avg_latency_us"] - userspace_summary["avg_latency_us"]) / max(
             userspace_summary["avg_latency_us"], 1
         )
 
         # Error rate comparison
-        error_improvement = (userspace_summary["failure_rate"] - ebpf_summary["failure_rate"]) / max(
+        error_improvement = (ebpf_summary["failure_rate"] - userspace_summary["failure_rate"]) / max(
             userspace_summary["failure_rate"], 0.001
         )
 
