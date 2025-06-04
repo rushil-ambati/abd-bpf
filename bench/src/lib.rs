@@ -49,7 +49,7 @@ pub fn init_logging() -> BenchmarkResult<()> {
         .format_target(false)
         .try_init()
         .map_err(|e| {
-            BenchmarkError::Initialization(format!("Failed to initialize logging: {}", e))
+            BenchmarkError::Initialization(format!("Failed to initialize logging: {e}"))
         })?;
 
     Ok(())

@@ -99,7 +99,7 @@ impl TimelineTracker {
 
         if let Ok(mut intervals) = self.intervals.lock() {
             // Ensure we have enough intervals
-            while intervals.len() <= interval_idx as usize {
+            while intervals.len() <= usize::try_from(interval_idx).unwrap_or(0) {
                 let new_interval_start = intervals.len() as u64 * self.interval_duration.as_secs();
                 intervals.push(IntervalData {
                     interval_start: new_interval_start,
@@ -110,7 +110,7 @@ impl TimelineTracker {
                 });
             }
 
-            if let Some(interval) = intervals.get_mut(interval_idx as usize) {
+            if let Some(interval) = intervals.get_mut(usize::try_from(interval_idx).unwrap_or(0)) {
                 interval.operations_sent += 1;
                 if success {
                     interval.operations_completed += 1;
@@ -184,7 +184,7 @@ pub fn run_throughput_benchmark(opts: &ThroughputArgs) -> BenchmarkResult<Throug
 
     // Load cluster configuration
     let cluster_config = ClusterConfig::load_from_file(&opts.config).map_err(|e| {
-        BenchmarkError::Configuration(format!("Failed to load cluster config: {}", e))
+        BenchmarkError::Configuration(format!("Failed to load cluster config: {e}"))
     })?;
 
     let use_netns = cluster_config.mode.as_deref() == Some("ebpf");
@@ -228,7 +228,7 @@ fn run_load_sweep_benchmark(
     let mut current_rps = opts.start_rps;
 
     while current_rps <= opts.max_rps {
-        info!("Testing load level: {} RPS", current_rps);
+        info!("Testing load level: {current_rps} RPS");
 
         // Create modified opts for this RPS level
         let mut level_opts = opts.clone();
@@ -246,15 +246,12 @@ fn run_load_sweep_benchmark(
 
                 // Stop if success rate drops below 95%
                 if results.summary.success_rate < 0.95 {
-                    warn!(
-                        "Success rate dropped below 95% at {} RPS, stopping sweep",
-                        current_rps
-                    );
+                    warn!("Success rate dropped below 95% at {current_rps} RPS, stopping sweep");
                     break;
                 }
             }
             Err(e) => {
-                error!("Failed to run benchmark at {} RPS: {}", current_rps, e);
+                error!("Failed to run benchmark at {current_rps} RPS: {e}");
                 break;
             }
         }
@@ -317,7 +314,7 @@ fn run_single_load_benchmark(
     let target_rps_per_thread = opts.target_rps.map(|rps| rps as f64 / total_threads as f64);
 
     // Spawn worker threads for each node
-    for (&node_id, &node_ip) in &node_ips {
+    for &node_id in node_ips.keys() {
         let iface = node_interfaces[&node_id].clone();
 
         for thread_id in 0..opts.threads_per_node {
@@ -331,14 +328,12 @@ fn run_single_load_benchmark(
             let ramp_up = opts.ramp_up;
             let write_ratio = opts.write_ratio;
             let max_in_flight = opts.max_in_flight;
-            let use_netns = use_netns;
             let iface_clone = iface.clone();
 
             let handle = thread::spawn(move || {
                 run_worker_thread(
                     node_id,
                     thread_id,
-                    node_ip,
                     &node_ips_clone,
                     &iface_clone,
                     duration,
@@ -351,7 +346,7 @@ fn run_single_load_benchmark(
                     stats_clone,
                     timeline_clone,
                     stop_flag_clone,
-                )
+                );
             });
 
             handles.push(handle);
@@ -365,7 +360,7 @@ fn run_single_load_benchmark(
     // Wait for all threads to complete
     for handle in handles {
         if let Err(e) = handle.join() {
-            error!("Thread panicked: {:?}", e);
+            error!("Thread panicked: {e:?}");
         }
     }
 
@@ -373,7 +368,7 @@ fn run_single_load_benchmark(
     let thread_stats = Arc::try_unwrap(stats)
         .map_err(|_| BenchmarkError::Internal("Failed to extract thread statistics".to_string()))?
         .into_inner()
-        .map_err(|e| BenchmarkError::Internal(format!("Mutex poisoned: {}", e)))?;
+        .map_err(|e| BenchmarkError::Internal(format!("Mutex poisoned: {e}")))?;
 
     // Calculate summary statistics
     let summary = calculate_throughput_summary(&thread_stats, opts.duration);
@@ -420,7 +415,6 @@ fn run_single_load_benchmark(
 fn run_worker_thread(
     thread_node_id: u32,
     thread_id: usize,
-    _thread_node_ip: std::net::Ipv4Addr,
     all_node_ips: &HashMap<u32, std::net::Ipv4Addr>,
     iface: &str,
     duration: u64,
@@ -440,18 +434,14 @@ fn run_worker_thread(
             Ok(ns) => {
                 if let Err(e) = ns.enter() {
                     error!(
-                        "Thread {}/{} failed to enter netns {}: {}",
-                        thread_node_id, thread_id, iface, e
+                        "Thread {thread_node_id}/{thread_id} failed to enter netns {iface}: {e}"
                     );
                     return;
                 }
                 Some(ns)
             }
             Err(e) => {
-                error!(
-                    "Thread {}/{} failed to get netns {}: {}",
-                    thread_node_id, thread_id, iface, e
-                );
+                error!("Thread {thread_node_id}/{thread_id} failed to get netns {iface}: {e}");
                 return;
             }
         }
@@ -512,7 +502,7 @@ fn run_worker_thread(
             if time_since_last < interval {
                 let sleep_duration = interval - time_since_last;
                 thread::sleep(sleep_duration);
-                last_request_time = last_request_time + interval;
+                last_request_time += interval;
             } else {
                 last_request_time = now;
             }
@@ -553,7 +543,7 @@ fn run_worker_thread(
         }
 
         match result {
-            Ok(_) => {
+            Ok(()) => {
                 received += 1;
                 if is_write {
                     writes_received += 1;
@@ -640,10 +630,7 @@ fn run_worker_thread(
     if let Ok(mut stats_guard) = stats.lock() {
         stats_guard.push(thread_stats);
     } else {
-        error!(
-            "Thread {}/{} failed to update shared statistics",
-            thread_node_id, thread_id
-        );
+        error!("Thread {thread_node_id}/{thread_id} failed to update shared statistics");
     }
 }
 

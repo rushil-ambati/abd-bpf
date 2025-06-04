@@ -71,7 +71,7 @@ fn main() -> BenchmarkResult<()> {
 
     // Handle any errors that occurred during benchmarking
     if let Err(ref e) = result {
-        error!("Benchmark failed: {}", e);
+        error!("Benchmark failed: {e}");
 
         // Print additional context for common error types
         match e {

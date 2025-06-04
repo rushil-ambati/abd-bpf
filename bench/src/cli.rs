@@ -142,7 +142,7 @@ pub struct ThroughputArgs {
 
     /// Load sweep mode: test multiple load levels
     ///
-    /// When enabled, automatically sweeps through load levels from start_rps to max_rps.
+    /// When enabled, automatically sweeps through load levels from `start_rps` to `max_rps`.
     #[arg(long)]
     pub sweep_load: bool,
 

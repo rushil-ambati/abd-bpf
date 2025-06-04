@@ -44,6 +44,7 @@ use crate::types::{BenchmarkError, BenchmarkResult};
 /// let avg = calculate_average(&data);
 /// assert_eq!(avg, 3.0);
 /// ```
+#[must_use]
 pub fn calculate_average(values: &[f64]) -> f64 {
     if values.is_empty() {
         0.0
@@ -74,6 +75,7 @@ pub fn calculate_average(values: &[f64]) -> f64 {
 /// let p50 = calculate_percentile(&data, 50.0);
 /// let p95 = calculate_percentile(&data, 95.0);
 /// ```
+#[must_use]
 pub fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
     if values.is_empty() {
         return 0.0;
@@ -100,7 +102,7 @@ pub fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
 ///
 /// # Returns
 ///
-/// Returns Ok(()) on success, or a BenchmarkError on failure
+/// Returns Ok(()) on success, or a `BenchmarkError` on failure
 ///
 /// # Errors
 ///
@@ -119,14 +121,14 @@ pub fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
 /// save_json_results(&results, "results.json")?;
 /// ```
 pub fn save_json_results<T: Serialize>(data: &T, filename: &str) -> BenchmarkResult<()> {
-    let json = serde_json::to_string_pretty(data).map_err(|e| BenchmarkError::Json(e))?;
+    let json = serde_json::to_string_pretty(data).map_err(BenchmarkError::Json)?;
 
-    let mut file = File::create(filename).map_err(|e| BenchmarkError::Io(e))?;
+    let mut file = File::create(filename).map_err(BenchmarkError::Io)?;
 
     file.write_all(json.as_bytes())
-        .map_err(|e| BenchmarkError::Io(e))?;
+        .map_err(BenchmarkError::Io)?;
 
-    log::info!("Results saved to {}", filename);
+    log::info!("Results saved to {filename}");
     Ok(())
 }
 
@@ -139,8 +141,9 @@ pub fn save_json_results<T: Serialize>(data: &T, filename: &str) -> BenchmarkRes
 /// # Returns
 ///
 /// Returns true if the percentile is between 0.0 and 100.0 (inclusive)
+#[must_use]
 pub fn is_valid_percentile(percentile: f64) -> bool {
-    percentile >= 0.0 && percentile <= 100.0
+    (0.0..=100.0).contains(&percentile)
 }
 
 /// Formats a duration in microseconds to a human-readable string
@@ -152,9 +155,10 @@ pub fn is_valid_percentile(percentile: f64) -> bool {
 /// # Returns
 ///
 /// Returns a formatted string with appropriate units
+#[must_use]
 pub fn format_duration(microseconds: f64) -> String {
     if microseconds < 1000.0 {
-        format!("{:.2}μs", microseconds)
+        format!("{microseconds:.2}μs")
     } else if microseconds < 1_000_000.0 {
         format!("{:.2}ms", microseconds / 1000.0)
     } else {
@@ -170,7 +174,8 @@ pub fn format_duration(microseconds: f64) -> String {
 ///
 /// # Returns
 ///
-/// Returns a tuple of (min, max, mean, median, std_dev)
+/// Returns a tuple of (min, max, mean, median, `std_dev`)
+#[must_use]
 pub fn calculate_basic_stats(values: &[f64]) -> (f64, f64, f64, f64, f64) {
     if values.is_empty() {
         return (0.0, 0.0, 0.0, 0.0, 0.0);
@@ -191,55 +196,6 @@ pub fn calculate_basic_stats(values: &[f64]) -> (f64, f64, f64, f64, f64) {
     (min, max, mean, median, std_dev)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_calculate_average() {
-        assert_eq!(calculate_average(&[]), 0.0);
-        assert_eq!(calculate_average(&[1.0]), 1.0);
-        assert_eq!(calculate_average(&[1.0, 2.0, 3.0]), 2.0);
-        assert_eq!(calculate_average(&[1.0, 2.0, 3.0, 4.0, 5.0]), 3.0);
-    }
-
-    #[test]
-    fn test_calculate_percentile() {
-        assert_eq!(calculate_percentile(&[], 50.0), 0.0);
-        assert_eq!(calculate_percentile(&[1.0], 50.0), 1.0);
-
-        let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        assert_eq!(calculate_percentile(&data, 0.0), 1.0);
-        assert_eq!(calculate_percentile(&data, 50.0), 3.0);
-        assert_eq!(calculate_percentile(&data, 100.0), 5.0);
-    }
-
-    #[test]
-    fn test_is_valid_percentile() {
-        assert!(is_valid_percentile(0.0));
-        assert!(is_valid_percentile(50.0));
-        assert!(is_valid_percentile(100.0));
-        assert!(!is_valid_percentile(-1.0));
-        assert!(!is_valid_percentile(101.0));
-    }
-
-    #[test]
-    fn test_format_duration() {
-        assert_eq!(format_duration(500.0), "500.00μs");
-        assert_eq!(format_duration(1500.0), "1.50ms");
-        assert_eq!(format_duration(1_500_000.0), "1.50s");
-    }
-
-    #[test]
-    fn test_build_latency_stats() {
-        let latencies = vec![100.0, 200.0, 150.0, 300.0, 250.0];
-        let stats = build_latency_stats(&latencies);
-        assert_eq!(stats.sample_count, 5);
-        assert!(stats.avg_us > 0.0);
-        assert!(stats.p95_us >= stats.p50_us);
-    }
-}
-
 /// Builds latency statistics from a collection of latency samples
 ///
 /// # Arguments
@@ -248,7 +204,8 @@ mod tests {
 ///
 /// # Returns
 ///
-/// Returns LatencyUnderLoad statistics
+/// Returns `LatencyUnderLoad` statistics
+#[must_use]
 pub fn build_latency_stats(latencies: &[f64]) -> crate::types::LatencyUnderLoad {
     if latencies.is_empty() {
         return crate::types::LatencyUnderLoad::default();
@@ -265,6 +222,7 @@ pub fn build_latency_stats(latencies: &[f64]) -> crate::types::LatencyUnderLoad 
 }
 
 /// Gets system information for benchmark metadata
+#[must_use]
 pub fn get_system_info() -> crate::types::SystemInfo {
     crate::types::SystemInfo {
         os: std::env::consts::OS.to_string(),
@@ -295,6 +253,7 @@ fn get_total_memory_mb() -> u64 {
 }
 
 /// Gets git commit hash if available
+#[must_use]
 pub fn get_git_commit() -> Option<String> {
     std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])

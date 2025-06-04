@@ -52,9 +52,9 @@ pub struct LatencyResults {
     pub timestamp: String,
     /// Arguments used for this benchmark run
     pub args: crate::cli::LatencyArgs,
-    /// Write latencies per node (node_id -> latencies in microseconds)
+    /// Write latencies per node (`node_id` -> latencies in microseconds)
     pub write_latencies: HashMap<u32, Vec<f64>>,
-    /// Read latencies per node (node_id -> latencies in microseconds)
+    /// Read latencies per node (`node_id` -> latencies in microseconds)
     pub read_latencies: HashMap<u32, Vec<f64>>,
     /// Aggregated summary statistics
     pub summary: LatencySummary,
@@ -259,7 +259,7 @@ pub struct BenchmarkConfig {
 
 impl BenchmarkConfig {
     /// Create a new benchmark configuration from a cluster config
-    pub fn from_cluster_config(cluster_config: &abd::ClusterConfig) -> Self {
+    #[must_use] pub fn from_cluster_config(cluster_config: &abd::ClusterConfig) -> Self {
         let node_ips = cluster_config
             .nodes
             .iter()
