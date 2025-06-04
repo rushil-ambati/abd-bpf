@@ -37,14 +37,16 @@ import time
 from pathlib import Path
 from typing import List
 
-# Import CPU monitoring for userspace mode
+# Import monitoring capabilities
 try:
-    from cpu_monitor import start_cpu_monitoring, stop_cpu_monitoring
+    from monitoring import start_cpu_monitoring, stop_cpu_monitoring, start_ebpf_monitoring, stop_ebpf_monitoring
 
     CPU_MONITORING_AVAILABLE = True
-except ImportError:
+    EBPF_MONITORING_AVAILABLE = True
+except ImportError as e:
     CPU_MONITORING_AVAILABLE = False
-    print("Warning: CPU monitoring not available. Install psutil for CPU monitoring support.")
+    EBPF_MONITORING_AVAILABLE = False
+    print(f"Warning: Monitoring not available. Install psutil for monitoring support: {e}")
 
 # --- Constants ---
 ROOT = Path(__file__).resolve().parent.parent
@@ -74,6 +76,13 @@ def cleanup(*_):
             stop_cpu_monitoring()
         except Exception as e:
             print(f"  Warning: could not stop CPU monitoring: {e}")
+
+    # Stop eBPF monitoring if it's running
+    if EBPF_MONITORING_AVAILABLE:
+        try:
+            stop_ebpf_monitoring()
+        except Exception as e:
+            print(f"  Warning: could not stop eBPF monitoring: {e}")
 
     if not bg_procs:
         return
@@ -409,6 +418,17 @@ def main():
             print(f"Warning: Could not start CPU monitoring: {e}")
     elif args.userspace and not CPU_MONITORING_AVAILABLE:
         print("Warning: CPU monitoring not available. Install psutil for monitoring support.")
+
+    # Start eBPF monitoring for eBPF mode
+    if not args.userspace and EBPF_MONITORING_AVAILABLE:
+        print("Starting eBPF program utilization monitoring for eBPF mode...")
+        try:
+            start_ebpf_monitoring(sample_interval=1.0, output_dir=LOGS)
+            print("eBPF monitoring active")
+        except Exception as e:
+            print(f"Warning: Could not start eBPF monitoring: {e}")
+    elif not args.userspace and not EBPF_MONITORING_AVAILABLE:
+        print("Warning: eBPF monitoring not available.")
 
     launch_nodes(args.num_nodes, args.userspace, target_dir)
     time.sleep(1)

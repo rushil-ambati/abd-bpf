@@ -16,16 +16,18 @@ from typing import Any, Dict
 
 from .config import BENCHMARK_DEFAULTS, EvaluationConfig
 
-# Import CPU monitoring for userspace benchmarks
+# Import monitoring capabilities
 try:
     import sys
 
     sys.path.append(str(Path(__file__).parent.parent))
-    from cpu_monitor import start_cpu_monitoring, stop_cpu_monitoring
+    from monitoring import start_cpu_monitoring, stop_cpu_monitoring, start_ebpf_monitoring, stop_ebpf_monitoring
 
     CPU_MONITORING_AVAILABLE = True
+    EBPF_MONITORING_AVAILABLE = True
 except ImportError:
     CPU_MONITORING_AVAILABLE = False
+    EBPF_MONITORING_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +210,18 @@ class BenchmarkRunner:
             except Exception as e:
                 logger.warning(f"Could not start CPU monitoring: {e}")
 
+        # Start eBPF monitoring for eBPF benchmarks
+        ebpf_monitor_started = False
+        if not is_userspace and EBPF_MONITORING_AVAILABLE:
+            try:
+                ebpf_logs_dir = self.config.data_dir
+                ebpf_logs_dir.mkdir(exist_ok=True)
+                start_ebpf_monitoring(sample_interval=1.0, output_dir=ebpf_logs_dir)
+                ebpf_monitor_started = True
+                logger.info(f"Started eBPF monitoring for eBPF {benchmark_type} benchmark")
+            except Exception as e:
+                logger.warning(f"Could not start eBPF monitoring: {e}")
+
         try:
             # Execute benchmark
             result = subprocess.run(
@@ -263,3 +277,11 @@ class BenchmarkRunner:
                     logger.info(f"Stopped CPU monitoring for userspace {benchmark_type} benchmark")
                 except Exception as e:
                     logger.warning(f"Error stopping CPU monitoring: {e}")
+
+            # Stop eBPF monitoring if it was started
+            if ebpf_monitor_started:
+                try:
+                    stop_ebpf_monitoring()
+                    logger.info(f"Stopped eBPF monitoring for eBPF {benchmark_type} benchmark")
+                except Exception as e:
+                    logger.warning(f"Error stopping eBPF monitoring: {e}")
