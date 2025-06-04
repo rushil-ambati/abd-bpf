@@ -124,9 +124,8 @@ pub fn run_latency_benchmark(opts: &LatencyArgs) -> BenchmarkResult<LatencyResul
         })?;
 
         // Create test data for this node
-        let test_value = format!(
-            "{base_value} hashmap={{author:node{node_id};version:1.0;license:MIT}}"
-        );
+        let test_value =
+            format!("{base_value} hashmap={{author:node{node_id};version:1.0;license:MIT}}");
         let test_data =
             AbdMessageData::from_str(&test_value).unwrap_or_else(|_| AbdMessageData::default());
 
@@ -205,15 +204,13 @@ fn benchmark_writes_from_node(
     };
 
     // Warmup phase
-    info!(
-        "Warming up writes for node {node_id} ({warmup} iterations)"
-    );
+    info!("Warming up writes for node {node_id} ({warmup} iterations)");
     for _ in 0..warmup {
         let result = if let Some(ref ns) = netns {
-            ns.run(|_| perform_write_operation(node_ipv4, data, Duration::from_secs(5)))
+            ns.run(|_| perform_write_operation(node_ipv4, data, Duration::from_millis(100)))
                 .map_err(|e| BenchmarkError::Namespace(format!("Netns run failed: {e}")))?
         } else {
-            perform_write_operation(node_ipv4, data, Duration::from_secs(5))
+            perform_write_operation(node_ipv4, data, Duration::from_millis(100))
         };
 
         // Ignore warmup results, just ensure operations work
@@ -223,9 +220,7 @@ fn benchmark_writes_from_node(
     }
 
     // Actual benchmark
-    info!(
-        "Benchmarking writes for node {node_id} ({iterations} iterations)"
-    );
+    info!("Benchmarking writes for node {node_id} ({iterations} iterations)");
     let mut failures = 0;
 
     for i in 0..iterations {
@@ -234,10 +229,10 @@ fn benchmark_writes_from_node(
         }
 
         let result = if let Some(ref ns) = netns {
-            ns.run(|_| perform_write_operation(node_ipv4, data, Duration::from_secs(5)))
+            ns.run(|_| perform_write_operation(node_ipv4, data, Duration::from_millis(100)))
                 .map_err(|e| BenchmarkError::Namespace(format!("Netns run failed: {e}")))?
         } else {
-            perform_write_operation(node_ipv4, data, Duration::from_secs(5))
+            perform_write_operation(node_ipv4, data, Duration::from_millis(100))
         };
 
         match result {
@@ -246,18 +241,14 @@ fn benchmark_writes_from_node(
                 failures += 1;
                 if failures <= 5 {
                     // Only log first few failures to avoid spam
-                    warn!(
-                        "Write operation failed for node {node_id} iteration {i}: {e}"
-                    );
+                    warn!("Write operation failed for node {node_id} iteration {i}: {e}");
                 }
             }
         }
     }
 
     if failures > 0 {
-        warn!(
-            "Node {node_id} had {failures} failed write operations out of {iterations}"
-        );
+        warn!("Node {node_id} had {failures} failed write operations out of {iterations}");
     }
 
     info!(
@@ -311,10 +302,10 @@ fn benchmark_reads_from_all_nodes(
         // Warmup for this node
         for _ in 0..warmup {
             let result = if let Some(ref ns) = netns {
-                ns.run(|_| perform_read_operation(read_ip, Duration::from_secs(5)))
+                ns.run(|_| perform_read_operation(read_ip, Duration::from_millis(100)))
                     .map_err(|e| BenchmarkError::Namespace(format!("Netns run failed: {e}")))?
             } else {
-                perform_read_operation(read_ip, Duration::from_secs(5))
+                perform_read_operation(read_ip, Duration::from_millis(100))
             };
 
             if let Err(e) = result {
@@ -323,17 +314,15 @@ fn benchmark_reads_from_all_nodes(
         }
 
         // Actual benchmark for this node
-        debug!(
-            "Benchmarking reads from node {read_node_id} ({iterations} iterations)"
-        );
+        debug!("Benchmarking reads from node {read_node_id} ({iterations} iterations)");
         let mut failures = 0;
 
         for _ in 0..iterations {
             let result = if let Some(ref ns) = netns {
-                ns.run(|_| perform_read_operation(read_ip, Duration::from_secs(5)))
+                ns.run(|_| perform_read_operation(read_ip, Duration::from_millis(100)))
                     .map_err(|e| BenchmarkError::Namespace(format!("Netns run failed: {e}")))?
             } else {
-                perform_read_operation(read_ip, Duration::from_secs(5))
+                perform_read_operation(read_ip, Duration::from_millis(100))
             };
 
             match result {
@@ -345,9 +334,7 @@ fn benchmark_reads_from_all_nodes(
         }
 
         if failures > 0 {
-            warn!(
-                "Node {read_node_id} had {failures} failed read operations out of {iterations}"
-            );
+            warn!("Node {read_node_id} had {failures} failed read operations out of {iterations}");
         }
     }
 

@@ -7,7 +7,7 @@ parameters across all analysis modules.
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 import matplotlib.pyplot as plt
 
@@ -25,6 +25,10 @@ class EvaluationConfig:
     # Benchmark settings
     debug: bool = False
     sweep: bool = False
+
+    # Scalability settings
+    scalability_mode: bool = False
+    scalability_node_counts: List[int] = None
 
     # Visualization settings
     skip_latex: bool = False
