@@ -37,6 +37,15 @@ import time
 from pathlib import Path
 from typing import List
 
+# Import CPU monitoring for userspace mode
+try:
+    from cpu_monitor import start_cpu_monitoring, stop_cpu_monitoring
+
+    CPU_MONITORING_AVAILABLE = True
+except ImportError:
+    CPU_MONITORING_AVAILABLE = False
+    print("Warning: CPU monitoring not available. Install psutil for CPU monitoring support.")
+
 # --- Constants ---
 ROOT = Path(__file__).resolve().parent.parent
 LOGS = ROOT / "logs"
@@ -59,6 +68,13 @@ def run_bg(name: str, *cmd: str) -> subprocess.Popen:
 
 def cleanup(*_):
     """Terminate all background processes on exit or signal."""
+    # Stop CPU monitoring if it's running
+    if CPU_MONITORING_AVAILABLE:
+        try:
+            stop_cpu_monitoring()
+        except Exception as e:
+            print(f"  Warning: could not stop CPU monitoring: {e}")
+
     if not bg_procs:
         return
     for proc in bg_procs:
@@ -382,6 +398,18 @@ def main():
     target_dir = build_targets(args.debug)
     setup_netns(args.num_nodes, args.userspace, target_dir)
     generate_config(args.num_nodes, args.userspace)
+
+    # Start CPU monitoring for userspace mode
+    if args.userspace and CPU_MONITORING_AVAILABLE:
+        print("Starting CPU utilization monitoring for userspace mode...")
+        try:
+            start_cpu_monitoring(sample_interval=0.1, output_dir=LOGS)
+            print("CPU monitoring active")
+        except Exception as e:
+            print(f"Warning: Could not start CPU monitoring: {e}")
+    elif args.userspace and not CPU_MONITORING_AVAILABLE:
+        print("Warning: CPU monitoring not available. Install psutil for monitoring support.")
+
     launch_nodes(args.num_nodes, args.userspace, target_dir)
     time.sleep(1)
     print()

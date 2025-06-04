@@ -22,7 +22,7 @@ use aya_ebpf::{
     maps::Array,
     programs::TcContext,
 };
-use aya_log_ebpf::{debug, error, info, warn};
+use aya_log_ebpf::{error, warn};
 use rkyv::munge::munge;
 
 /// Set from userspace

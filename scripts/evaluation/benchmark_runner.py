@@ -16,6 +16,17 @@ from typing import Any, Dict
 
 from .config import BENCHMARK_DEFAULTS, EvaluationConfig
 
+# Import CPU monitoring for userspace benchmarks
+try:
+    import sys
+
+    sys.path.append(str(Path(__file__).parent.parent))
+    from cpu_monitor import start_cpu_monitoring, stop_cpu_monitoring
+
+    CPU_MONITORING_AVAILABLE = True
+except ImportError:
+    CPU_MONITORING_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -182,6 +193,21 @@ class BenchmarkRunner:
         """
         start_time = time.time()
 
+        # Determine if this is a userspace benchmark
+        is_userspace = "-u" in cmd or "--userspace" in cmd
+
+        # Start CPU monitoring for userspace benchmarks
+        cpu_monitor_started = False
+        if is_userspace and CPU_MONITORING_AVAILABLE:
+            try:
+                cpu_logs_dir = self.config.data_dir
+                cpu_logs_dir.mkdir(exist_ok=True)
+                start_cpu_monitoring(sample_interval=0.1, output_dir=cpu_logs_dir)
+                cpu_monitor_started = True
+                logger.info(f"Started CPU monitoring for userspace {benchmark_type} benchmark")
+            except Exception as e:
+                logger.warning(f"Could not start CPU monitoring: {e}")
+
         try:
             # Execute benchmark
             result = subprocess.run(
@@ -229,3 +255,11 @@ class BenchmarkRunner:
         except Exception as e:
             logger.error(f"Unexpected error during benchmark execution: {e}")
             raise
+        finally:
+            # Stop CPU monitoring if it was started
+            if cpu_monitor_started:
+                try:
+                    stop_cpu_monitoring()
+                    logger.info(f"Stopped CPU monitoring for userspace {benchmark_type} benchmark")
+                except Exception as e:
+                    logger.warning(f"Error stopping CPU monitoring: {e}")
