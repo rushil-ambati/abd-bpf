@@ -24,6 +24,7 @@ class EvaluationConfig:
 
     # Benchmark settings
     debug: bool = False
+    sweep: bool = False
 
     # Visualization settings
     skip_latex: bool = False

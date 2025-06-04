@@ -177,6 +177,7 @@ def create_config_from_args(args) -> EvaluationConfig:
         debug=args.debug,
         skip_latex=args.skip_latex,
         num_nodes=args.num_nodes if hasattr(args, "num_nodes") else 3,
+        sweep=args.sweep,
     )
 
 
@@ -193,6 +194,7 @@ Examples:
   %(prog)s --output my_results       # Custom output directory
   %(prog)s --skip-latex              # Disable LaTeX in plots
   %(prog)s --num-nodes 5             # Use 5 nodes for benchmarking
+  %(prog)s --sweep                   # Enable sweep load testing
         """,
     )
 
@@ -209,6 +211,7 @@ Examples:
     parser.add_argument(
         "--num-nodes", type=int, default=3, help="Number of nodes to use for benchmarking (default: 3)"
     )
+    parser.add_argument("--sweep", action="store_true", help="Enable sweep load testing for throughput benchmarks")
 
     args = parser.parse_args()
 

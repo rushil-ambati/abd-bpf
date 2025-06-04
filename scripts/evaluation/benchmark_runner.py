@@ -120,7 +120,8 @@ class BenchmarkRunner:
 
     def _run_throughput_benchmark(self, implementation: str) -> Dict[str, Any]:
         """Run throughput benchmark for specified implementation."""
-        logger.info(f"Running throughput benchmark for {implementation} with sweep load testing")
+        mode = "sweep load testing" if self.config.sweep else "regular mode"
+        logger.info(f"Running throughput benchmark for {implementation} in {mode}")
 
         # Prepare command
         cmd = ["python3", "scripts/run.py", "--num-nodes", str(self.config.num_nodes)]
@@ -136,8 +137,12 @@ class BenchmarkRunner:
         env["ABD_BENCH_OUTPUT"] = output_filename
 
         # Set sweep load testing environment variables
-        env["ABD_BENCH_SWEEP_LOAD"] = ""
-        env["ABD_BENCH_DURATION"] = "5"
+        if self.config.sweep:
+            env["ABD_BENCH_SWEEP_LOAD"] = ""
+            env["ABD_BENCH_DURATION"] = "5"
+            logger.info("Sweep load testing enabled")
+        else:
+            logger.info("Sweep load testing disabled")
 
         if self.config.debug:
             env["RUST_LOG"] = "debug"

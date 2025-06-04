@@ -59,7 +59,7 @@ async fn start_op(ctx: &Context, msg: &mut ArchivedAbdMessage, client: SocketAdd
         .compare_exchange(0, new_phase, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
-        warn!("{role:?} busy – drop");
+        // warn!("{role:?} busy – drop");
         return;
     }
 

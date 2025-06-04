@@ -302,6 +302,6 @@ logs/
 
 cluster_config.json
 *_results.json
-evaluation_results/
+evaluation_results*/
 
 .venv/

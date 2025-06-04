@@ -7,7 +7,7 @@ authors = ["ABD Project"]
 license = "MIT OR Apache-2.0"
 
 [features]
-default = []
+default = ["multi-writer"]
 multi-writer = []
 
 [dependencies]

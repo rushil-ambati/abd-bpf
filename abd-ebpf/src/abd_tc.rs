@@ -98,11 +98,11 @@ fn try_abd_tc(ctx: &TcContext) -> Result<i32, AbdError> {
 
     match (msg_type, recipient_role, sender_role) {
         (AbdMessageType::Read, AbdRole::Reader, AbdRole::Client) => {
-            info!(ctx, "received READ request");
+            // info!(ctx, "received READ request");
             handle_client_read(ctx, pkt, my_id, num_nodes)
         }
         (AbdMessageType::Write, AbdRole::Writer, AbdRole::Client) => {
-            info!(ctx, "received WRITE request");
+            // info!(ctx, "received WRITE request");
             handle_client_write(ctx, pkt, my_id, num_nodes)
         }
         (AbdMessageType::ReadAck, AbdRole::Reader, AbdRole::Server) => {
@@ -129,7 +129,7 @@ fn handle_client_read(
     let i = ABD_R_IDX;
 
     if STATUS.get(i).map_or(0, |s| s.val) != 0 {
-        warn!(ctx, "drop READ, busy", itos(i));
+        // warn!(ctx, "drop READ, busy", itos(i));
         return Ok(TC_ACT_SHOT);
     }
 
@@ -193,12 +193,12 @@ fn handle_client_write(
         pkt.udp.check = udp_csum;
 
         let writer = NODES.get(1).ok_or(AbdError::MapLookupError)?;
-        info!(ctx, "forwarding WRITE to writer");
+        // info!(ctx, "forwarding WRITE to writer");
         return tc::redirect_to_node(ctx, writer);
     }
 
     if STATUS.get(ABD_W_IDX).map_or(0, |s| s.val) != 0 {
-        warn!(ctx, "drop WRITE, busy");
+        // warn!(ctx, "drop WRITE, busy");
         return Ok(TC_ACT_SHOT);
     }
 
@@ -294,12 +294,12 @@ fn handle_read_ack(
     };
 
     if STATUS.get(i).map_or(0, |s| s.val) != 1 {
-        debug!(
-            ctx,
-            "{}: ignore READ-ACK from @{}, not in phase 1",
-            tc::itos(i),
-            pkt.msg.sender_id.to_native()
-        );
+        // debug!(
+        //     ctx,
+        //     "{}: ignore READ-ACK from @{}, not in phase 1",
+        //     tc::itos(i),
+        //     pkt.msg.sender_id.to_native()
+        // );
         return Ok(TC_ACT_SHOT);
     }
 
@@ -316,14 +316,14 @@ fn handle_read_ack(
         return Ok(TC_ACT_SHOT);
     }
 
-    debug!(
-        ctx,
-        "{}: READ-ACK from @{}, tag=<{},{}>",
-        tc::itos(i),
-        pkt.msg.sender_id.to_native(),
-        tag::seq(pkt.msg.tag.to_native()),
-        tag::wid(pkt.msg.tag.to_native())
-    );
+    // debug!(
+    //     ctx,
+    //     "{}: READ-ACK from @{}, tag=<{},{}>",
+    //     tc::itos(i),
+    //     pkt.msg.sender_id.to_native(),
+    //     tag::seq(pkt.msg.tag.to_native()),
+    //     tag::wid(pkt.msg.tag.to_native())
+    // );
 
     // maybe update max tag & data
     let max = map_get_mut(&TAG_DATA, i)?;
@@ -348,17 +348,17 @@ fn handle_read_ack(
     let acks = map_increment_locked(&ACK_COUNT, i)?;
     let majority = u64::from(((num_nodes) >> 1) + 1);
     if acks < majority {
-        debug!(
-            ctx,
-            "{}: Got {} READ-ACK(s), waiting for majority ({})...",
-            tc::itos(i),
-            acks,
-            majority
-        );
+        // debug!(
+        //     ctx,
+        //     "{}: Got {} READ-ACK(s), waiting for majority ({})...",
+        //     tc::itos(i),
+        //     acks,
+        //     majority
+        // );
         return Ok(TC_ACT_SHOT);
     }
 
-    info!(ctx, "{}: Got majority READ-ACK(s)", tc::itos(i));
+    // info!(ctx, "{}: Got majority READ-ACK(s)", tc::itos(i));
 
     // proceed to phase 2
     map_update_locked(&STATUS, i, &2)?;
@@ -405,13 +405,13 @@ fn handle_read_ack(
 
     pkt.udp.check = udp_csum;
 
-    info!(
-        ctx,
-        "{}: Propagate tag <{},{}>",
-        tc::itos(i),
-        tag::seq(prop_tag),
-        tag::wid(prop_tag)
-    );
+    // info!(
+    //     ctx,
+    //     "{}: Propagate tag <{},{}>",
+    //     tc::itos(i),
+    //     tag::seq(prop_tag),
+    //     tag::wid(prop_tag)
+    // );
 
     broadcast_to_nodes(ctx, my_id, &NODES, num_nodes).map(|()| TC_ACT_STOLEN)
 }
@@ -439,12 +439,12 @@ fn handle_write_ack(
     };
 
     if STATUS.get(i).map_or(0, |s| s.val) != 2 {
-        debug!(
-            ctx,
-            "{}: Ignore WRITE-ACK from @{}, not in phase 2",
-            tc::itos(i),
-            pkt.msg.sender_id.to_native()
-        );
+        // debug!(
+        //     ctx,
+        //     "{}: Ignore WRITE-ACK from @{}, not in phase 2",
+        //     tc::itos(i),
+        //     pkt.msg.sender_id.to_native()
+        // );
         return Ok(TC_ACT_SHOT);
     }
 
@@ -461,27 +461,27 @@ fn handle_write_ack(
         return Ok(TC_ACT_SHOT);
     }
 
-    debug!(
-        ctx,
-        "{}: Received WRITE-ACK from @{}",
-        tc::itos(i),
-        pkt.msg.sender_id.to_native(),
-    );
+    // debug!(
+    //     ctx,
+    //     "{}: Received WRITE-ACK from @{}",
+    //     tc::itos(i),
+    //     pkt.msg.sender_id.to_native(),
+    // );
 
     let acks = map_increment_locked(&ACK_COUNT, i)?;
     let majority = u64::from((num_nodes >> 1) + 1);
     if acks < majority {
-        debug!(
-            ctx,
-            "{}: Got {} WRITE-ACK(s), waiting for majority ({})...",
-            tc::itos(i),
-            acks,
-            majority
-        );
+        // debug!(
+        //     ctx,
+        //     "{}: Got {} WRITE-ACK(s), waiting for majority ({})...",
+        //     tc::itos(i),
+        //     acks,
+        //     majority
+        // );
         return Ok(TC_ACT_SHOT);
     }
 
-    info!(ctx, "{}: Committed", tc::itos(i));
+    // info!(ctx, "{}: Committed", tc::itos(i));
 
     // back to idle
     map_update_locked(&STATUS, i, &0)?;
@@ -518,7 +518,7 @@ fn handle_write_ack(
     let client = CLIENT_INFO.get(i).ok_or(AbdError::MapLookupError)?;
     let me = NODES.get(my_id).ok_or(AbdError::MapLookupError)?;
     redirect_to_client(ctx, client, me).inspect(|_| {
-        info!(ctx, "{}: ACK -> {}", tc::itos(i), client.ipv4);
+        // info!(ctx, "{}: ACK -> {}", tc::itos(i), client.ipv4);
     })
 }
 
