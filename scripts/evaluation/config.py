@@ -5,10 +5,11 @@ Defines configuration classes and setup functions for consistent evaluation
 parameters across all analysis modules.
 """
 
-import matplotlib.pyplot as plt
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Dict, Any
-from dataclasses import dataclass, asdict
+from typing import Any, Dict
+
+import matplotlib.pyplot as plt
 
 
 @dataclass
@@ -25,7 +26,7 @@ class EvaluationConfig:
     skip_latex: bool = False
 
     # Color scheme for consistent plotting
-    colors: Dict[str, str] = dict()
+    colors: Dict[str, str] = None
 
     def __post_init__(self):
         """Initialize derived attributes."""

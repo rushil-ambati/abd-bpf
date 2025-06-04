@@ -5,11 +5,12 @@ Generates comprehensive markdown reports combining latency and throughput
 analysis with statistical insights and recommendations.
 """
 
-import logging
-import pandas as pd
-from pathlib import Path
-from typing import Dict, Any
 import json
+import logging
+from pathlib import Path
+from typing import Any, Dict
+
+import pandas as pd
 
 from .config import EvaluationConfig
 
@@ -56,57 +57,41 @@ class ReportGenerator:
         f.write("---\n\n")
         f.write(f"**Generated:** {metadata.get('timestamp', 'N/A')}\n")
         f.write(f"**Analysis Duration:** {metadata.get('duration_seconds', 0):.1f} seconds\n")
-        f.write(f"**Evaluation Framework Version:** 2.0.0\n")
+        f.write("**Evaluation Framework Version:** 2.0.0\n")
         f.write("**Analysis Type:** Latency + Throughput Comprehensive Benchmark\n\n")
 
     def _write_executive_summary(self, f, analysis: Dict[str, Any]):
         """Write executive summary with key findings."""
         f.write("## Executive Summary\n\n")
-
-        # Extract key metrics
         throughput_analysis = analysis.get("throughput", {})
-        latency_analysis = analysis.get("latency", {})
-
-        # Throughput summary
         comparative = throughput_analysis.get("comparative_analysis", {})
         performance_improvements = comparative.get("performance_improvements", {})
         winner_analysis = comparative.get("winner_analysis", {})
-
         f.write("### Key Performance Indicators\n\n")
-
-        # Throughput improvements
         throughput_improvement = performance_improvements.get("throughput_improvement_pct", 0)
         latency_improvement = performance_improvements.get("latency_improvement_pct", 0)
         error_improvement = performance_improvements.get("error_improvement_pct", 0)
-
         f.write(f"- **Throughput Performance**: eBPF shows {throughput_improvement:+.1f}% ")
         f.write(f"{'improvement' if throughput_improvement > 0 else 'degradation'} over userspace\n")
-
         f.write(f"- **Latency Performance**: eBPF shows {latency_improvement:+.1f}% ")
         f.write(f"{'improvement' if latency_improvement > 0 else 'degradation'} in latency under load\n")
-
         f.write(f"- **Reliability**: eBPF shows {error_improvement:+.1f}% ")
         f.write(f"{'improvement' if error_improvement > 0 else 'degradation'} in error rate\n\n")
-
-        # Winner analysis
         f.write("### Performance Leadership by Dimension\n\n")
         for dimension, winner in winner_analysis.items():
             f.write(f"- **{dimension.replace('_', ' ').title()}**: {winner.upper()}\n")
         f.write("\n")
-
-        # Overall recommendation
         throughput_winner = winner_analysis.get("throughput", "unknown")
         latency_winner = winner_analysis.get("latency", "unknown")
         reliability_winner = winner_analysis.get("reliability", "unknown")
-
         if throughput_winner == latency_winner == reliability_winner:
             overall_winner = throughput_winner
-            f.write(f"### Overall Recommendation\n\n")
+            f.write("### Overall Recommendation\n\n")
             f.write(f"**{overall_winner.upper()}** implementation demonstrates superior performance ")
-            f.write(f"across all key dimensions (throughput, latency, and reliability).\n\n")
+            f.write("across all key dimensions (throughput, latency, and reliability).\n\n")
         else:
-            f.write(f"### Overall Assessment\n\n")
-            f.write(f"Performance characteristics vary by dimension. Consider workload requirements:\n")
+            f.write("### Overall Assessment\n\n")
+            f.write("Performance characteristics vary by dimension. Consider workload requirements:\n")
             f.write(f"- For **maximum throughput**: {throughput_winner.upper()}\n")
             f.write(f"- For **lowest latency**: {latency_winner.upper()}\n")
             f.write(f"- For **highest reliability**: {reliability_winner.upper()}\n\n")
@@ -210,7 +195,7 @@ class ReportGenerator:
                     user_mean = user_stats.get("mean", 0)
                     improvement = ((user_mean - ebpf_mean) / user_mean) * 100 if user_mean > 0 else 0
 
-                    f.write(f"**Performance Summary:**\n")
+                    f.write("**Performance Summary:**\n")
                     f.write(f"- eBPF Mean: {ebpf_mean:.3f} μs\n")
                     f.write(f"- Userspace Mean: {user_mean:.3f} μs\n")
                     f.write(f"- eBPF shows {improvement:+.1f}% ")
@@ -376,11 +361,9 @@ class ReportGenerator:
         f.write("## Recommendations\n\n")
 
         throughput_analysis = analysis.get("throughput", {})
-        latency_analysis = analysis.get("latency", {})
         comparative = throughput_analysis.get("comparative_analysis", {})
 
         performance_improvements = comparative.get("performance_improvements", {})
-        winner_analysis = comparative.get("winner_analysis", {})
 
         f.write("### Implementation Selection Guidelines\n\n")
 
@@ -568,10 +551,12 @@ class ReportGenerator:
 
         if latency_table_data:
             f.write(
-                "| Implementation | Operation | Count | Mean (μs) | Median (μs) | Std Dev (μs) | P95 (μs) | P99 (μs) | CV | Skewness |\n"
+                "| Implementation | Operation | Count | Mean (μs) | Median (μs) |"
+                " Std Dev (μs) | P95 (μs) | P99 (μs) | CV | Skewness |\n"
             )
             f.write(
-                "|----------------|-----------|-------|-----------|-------------|--------------|----------|----------|----|-----------|\n"
+                "|----------------|-----------|-------|-----------|-------------|"
+                "--------------|----------|----------|----|-----------|\n"
             )
             for row in latency_table_data:
                 f.write(f"| {' | '.join(row)} |\n")

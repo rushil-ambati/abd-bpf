@@ -6,14 +6,15 @@ for latency benchmark results.
 """
 
 import logging
+from typing import Any, Dict, List
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from scipy import stats
-from scipy.stats import mannwhitneyu, ttest_ind, shapiro, levene
-from typing import Dict, List, Any, Optional
+from scipy.stats import levene, mannwhitneyu, shapiro, ttest_ind
 
-from .config import EvaluationConfig, STATISTICAL_CONFIG
+from .config import STATISTICAL_CONFIG, EvaluationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +229,7 @@ class LatencyAnalyzer:
         else:
             return "large"
 
-    def create_all_visualizations(self, ebpf_data: Dict, userspace_data: Dict, analysis: Dict):
+    def create_all_visualizations(self, ebpf_data: Dict, userspace_data: Dict):
         """Create all latency-related visualizations."""
         logger.info("Generating latency visualizations")
 
@@ -297,7 +298,7 @@ class LatencyAnalyzer:
 
         # Histogram with density
         ax2 = axes[0, 1]
-        max_val = max(np.max(ebpf_us), np.max(userspace_us))
+        # max_val = max(np.max(ebpf_us), np.max(userspace_us))
         bins = np.linspace(0, np.percentile([*ebpf_us, *userspace_us], 95), 50)
 
         ax2.hist(ebpf_us, bins=bins, alpha=0.7, label="eBPF", color=self.config.colors["ebpf"], density=True)
@@ -360,7 +361,7 @@ class LatencyAnalyzer:
         x = np.arange(len(percentiles))
         width = 0.35
 
-        fig, ax = plt.subplots(figsize=(12, 8))
+        _, ax = plt.subplots(figsize=(12, 8))
         bars1 = ax.bar(x - width / 2, ebpf_percs, width, label="eBPF", color=self.config.colors["ebpf"])
         bars2 = ax.bar(x + width / 2, userspace_percs, width, label="Userspace", color=self.config.colors["userspace"])
 
@@ -485,7 +486,7 @@ class LatencyAnalyzer:
 
     def create_node_breakdown(self, data: Dict, implementation: str, operation: str):
         """Create per-node latency breakdown."""
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        _, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
 
         node_data = []
         node_labels = []

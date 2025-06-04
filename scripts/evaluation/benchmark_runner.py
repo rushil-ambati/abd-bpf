@@ -12,9 +12,9 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
-from .config import EvaluationConfig, BENCHMARK_DEFAULTS
+from .config import BENCHMARK_DEFAULTS, EvaluationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ class BenchmarkRunner:
             env["RUST_LOG"] = "info"
 
         return self._execute_benchmark(
-            cmd, env, output_filename, BENCHMARK_DEFAULTS["latency"]["timeout_seconds"], "latency", implementation
+            cmd, env, output_filename, BENCHMARK_DEFAULTS["latency"]["timeout_seconds"], "latency"
         )
 
     def _run_throughput_benchmark(self, implementation: str) -> Dict[str, Any]:
@@ -141,12 +141,7 @@ class BenchmarkRunner:
             env["RUST_LOG"] = "info"
 
         return self._execute_benchmark(
-            cmd,
-            env,
-            output_filename,
-            BENCHMARK_DEFAULTS["throughput"]["timeout_seconds"],
-            "throughput",
-            implementation,
+            cmd, env, output_filename, BENCHMARK_DEFAULTS["throughput"]["timeout_seconds"], "throughput"
         )
 
     def _execute_benchmark(
@@ -156,7 +151,6 @@ class BenchmarkRunner:
         output_filename: str,
         timeout_seconds: int,
         benchmark_type: str,
-        implementation: str,
     ) -> Dict[str, Any]:
         """
         Execute a benchmark command and handle results.

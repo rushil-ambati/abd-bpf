@@ -15,13 +15,14 @@ import argparse
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 
+import matplotlib.pyplot as plt
 from evaluation.benchmark_runner import BenchmarkRunner
-from evaluation.latency_analyzer import LatencyAnalyzer
-from evaluation.throughput_analyzer import ThroughputAnalyzer
-from evaluation.report_generator import ReportGenerator
 from evaluation.config import EvaluationConfig, setup_matplotlib
+from evaluation.latency_analyzer import LatencyAnalyzer
+from evaluation.report_generator import ReportGenerator
+from evaluation.throughput_analyzer import ThroughputAnalyzer
 
 # Configure logging
 logging.basicConfig(
@@ -97,7 +98,7 @@ class ABDEvaluator:
 
             # Latency visualizations
             self.latency_analyzer.create_all_visualizations(
-                benchmark_results["latency"]["ebpf"], benchmark_results["latency"]["userspace"], latency_analysis
+                benchmark_results["latency"]["ebpf"], benchmark_results["latency"]["userspace"]
             )
 
             # Throughput visualizations
@@ -108,7 +109,7 @@ class ABDEvaluator:
             )
 
             # Combined analysis visualizations
-            self._create_combined_visualizations(benchmark_results, latency_analysis, throughput_analysis)
+            self._create_combined_visualizations(benchmark_results)
 
             # Step 4: Generate comprehensive report
             logger.info("Generating comprehensive report...")
@@ -138,14 +139,11 @@ class ABDEvaluator:
             logger.error(f"Evaluation failed: {e}")
             raise
 
-    def _create_combined_visualizations(
-        self, benchmark_results: Dict, latency_analysis: Dict, throughput_analysis: Dict
-    ):
+    def _create_combined_visualizations(self, benchmark_results: Dict):
         """Create visualizations that combine latency and throughput insights."""
-        import matplotlib.pyplot as plt
 
         # Throughput vs Latency scatter plot
-        fig, ax = plt.subplots(figsize=(12, 8))
+        _, ax = plt.subplots(figsize=(12, 8))
 
         for impl in ["ebpf", "userspace"]:
             throughput_data = benchmark_results["throughput"][impl]

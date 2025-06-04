@@ -7,15 +7,15 @@ trade-offs.
 """
 
 import logging
+from typing import Any, Dict, List
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from scipy import stats
-from scipy.stats import mannwhitneyu, ttest_ind
-from typing import Dict, List, Any, Optional, Tuple
+from scipy.stats import mannwhitneyu
 
-from .config import EvaluationConfig, STATISTICAL_CONFIG
+from .config import STATISTICAL_CONFIG, EvaluationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -248,10 +248,10 @@ class ThroughputAnalyzer:
             )
 
         # Aggregate statistics
-        avg_latencies = [l["avg"] for l in all_latencies]
-        p95_latencies = [l["p95"] for l in all_latencies]
-        p99_latencies = [l["p99"] for l in all_latencies]
-        max_latencies = [l["max"] for l in all_latencies]
+        avg_latencies = [lat["avg"] for lat in all_latencies]
+        p95_latencies = [lat["p95"] for lat in all_latencies]
+        p99_latencies = [lat["p99"] for lat in all_latencies]
+        max_latencies = [lat["max"] for lat in all_latencies]
 
         return {
             "cross_thread_latency_variance": {
@@ -344,7 +344,7 @@ class ThroughputAnalyzer:
         logger.info("Generating throughput visualizations")
 
         # Main performance comparison
-        self.create_performance_overview(ebpf_data, userspace_data, analysis)
+        self.create_performance_overview(analysis)
 
         # Timeline analysis
         self.create_timeline_analysis(ebpf_data, userspace_data)
@@ -353,7 +353,7 @@ class ThroughputAnalyzer:
         self.create_throughput_latency_analysis(ebpf_data, userspace_data)
 
         # Error analysis
-        self.create_error_analysis(ebpf_data, userspace_data, analysis)
+        self.create_error_analysis(analysis)
 
         # Thread performance analysis
         self.create_thread_performance_analysis(ebpf_data, userspace_data)
@@ -363,7 +363,7 @@ class ThroughputAnalyzer:
 
         logger.info("Completed throughput visualizations")
 
-    def create_performance_overview(self, ebpf_data: Dict, userspace_data: Dict, analysis: Dict):
+    def create_performance_overview(self, analysis: Dict):
         """Create comprehensive performance overview dashboard."""
         fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         fig.suptitle("Throughput Performance Overview: eBPF vs Userspace", fontsize=16, fontweight="bold")
@@ -402,8 +402,8 @@ class ThroughputAnalyzer:
         write_rps = [ebpf_stats["write_rps"], user_stats["write_rps"]]
         read_rps = [ebpf_stats["read_rps"], user_stats["read_rps"]]
 
-        bars2a = ax2.bar(x - width / 2, write_rps, width, label="Write", color=self.config.colors["accent"])
-        bars2b = ax2.bar(x + width / 2, read_rps, width, label="Read", color=self.config.colors["neutral"])
+        ax2.bar(x - width / 2, write_rps, width, label="Write", color=self.config.colors["accent"])
+        ax2.bar(x + width / 2, read_rps, width, label="Read", color=self.config.colors["neutral"])
 
         ax2.set_ylabel("Requests per Second")
         ax2.set_title("Write vs Read Throughput")
@@ -459,8 +459,8 @@ class ThroughputAnalyzer:
         p99_values = [ebpf_stats["p99_latency_us"], user_stats["p99_latency_us"]]
 
         x = np.arange(len(implementations))
-        bars5a = ax5.bar(x - width / 2, p95_values, width, label="P95", color=self.config.colors["warning"])
-        bars5b = ax5.bar(x + width / 2, p99_values, width, label="P99", color=self.config.colors["error"])
+        ax5.bar(x - width / 2, p95_values, width, label="P95", color=self.config.colors["warning"])
+        ax5.bar(x + width / 2, p99_values, width, label="P99", color=self.config.colors["error"])
 
         ax5.set_ylabel("Latency (μs)")
         ax5.set_title("Tail Latencies Under Load")
@@ -558,22 +558,35 @@ class ThroughputAnalyzer:
         # Calculate rolling CV for stability analysis
         window_size = min(3, len(ebpf_rps) // 2)
         if window_size >= 2:
-            ebpf_cv = [
-                np.std(ebpf_rps[max(0, i - window_size) : i + 1]) / np.mean(ebpf_rps[max(0, i - window_size) : i + 1])
+            ebpf_rolling_cv = [
+                (
+                    np.std(ebpf_rps[max(0, i - window_size + 1) : i + 1])
+                    / np.mean(ebpf_rps[max(0, i - window_size + 1) : i + 1])
+                    if np.mean(ebpf_rps[max(0, i - window_size + 1) : i + 1]) > 0
+                    else 0
+                )
                 for i in range(len(ebpf_rps))
             ]
-            user_cv = [
-                np.std(user_rps[max(0, i - window_size) : i + 1]) / np.mean(user_rps[max(0, i - window_size) : i + 1])
+            user_rolling_cv = [
+                (
+                    np.std(user_rps[max(0, i - window_size + 1) : i + 1])
+                    / np.mean(user_rps[max(0, i - window_size + 1) : i + 1])
+                    if np.mean(user_rps[max(0, i - window_size + 1) : i + 1]) > 0
+                    else 0
+                )
                 for i in range(len(user_rps))
             ]
 
-            ax4.plot(ebpf_times, ebpf_cv, label="eBPF", color=self.config.colors["ebpf"], linewidth=2)
-            ax4.plot(user_times, user_cv, label="Userspace", color=self.config.colors["userspace"], linewidth=2)
-            ax4.set_xlabel("Time (seconds)")
-            ax4.set_ylabel("Performance Variation (CV)")
-            ax4.set_title("Performance Stability")
-            ax4.legend()
-            ax4.grid(True, alpha=0.3)
+            ax4.plot(ebpf_times, ebpf_rolling_cv, label="eBPF CV", color=self.config.colors["ebpf"], linewidth=2)
+            ax4.plot(
+                user_times, user_rolling_cv, label="Userspace CV", color=self.config.colors["userspace"], linewidth=2
+            )
+
+        ax4.set_xlabel("Time (seconds)")
+        ax4.set_ylabel("Rolling CV")
+        ax4.set_title("Performance Stability (CV)")
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
 
         plt.tight_layout()
 
@@ -657,8 +670,8 @@ class ThroughputAnalyzer:
         x = np.arange(len(percentiles))
         width = 0.35
 
-        bars1 = ax2.bar(x - width / 2, ebpf_values, width, label="eBPF", color=self.config.colors["ebpf"])
-        bars2 = ax2.bar(x + width / 2, user_values, width, label="Userspace", color=self.config.colors["userspace"])
+        ax2.bar(x - width / 2, ebpf_values, width, label="eBPF", color=self.config.colors["ebpf"])
+        ax2.bar(x + width / 2, user_values, width, label="Userspace", color=self.config.colors["userspace"])
 
         ax2.set_xlabel("Latency Percentiles")
         ax2.set_ylabel("Latency (μs)")
@@ -675,7 +688,7 @@ class ThroughputAnalyzer:
             plt.savefig(self.config.figures_dir / f"throughput_latency_analysis.{fmt}")
         plt.close()
 
-    def create_error_analysis(self, ebpf_data: Dict, userspace_data: Dict, analysis: Dict):
+    def create_error_analysis(self, analysis: Dict):
         """Create error rate and reliability analysis."""
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         fig.suptitle("Error Analysis and Reliability", fontsize=16, fontweight="bold")
@@ -721,10 +734,8 @@ class ThroughputAnalyzer:
             x = np.arange(len(nodes))
             width = 0.35
 
-            bars2a = ax2.bar(x - width / 2, ebpf_node_rates, width, label="eBPF", color=self.config.colors["ebpf"])
-            bars2b = ax2.bar(
-                x + width / 2, user_node_rates, width, label="Userspace", color=self.config.colors["userspace"]
-            )
+            ax2.bar(x - width / 2, ebpf_node_rates, width, label="eBPF", color=self.config.colors["ebpf"])
+            ax2.bar(x + width / 2, user_node_rates, width, label="Userspace", color=self.config.colors["userspace"])
 
             ax2.set_xlabel("Node ID")
             ax2.set_ylabel("Error Rate (%)")
@@ -738,9 +749,7 @@ class ThroughputAnalyzer:
         ax3 = axes[1, 0]
         error_variances = [ebpf_errors.get("error_variance", 0), user_errors.get("error_variance", 0)]
 
-        bars3 = ax3.bar(
-            implementations, error_variances, color=[self.config.colors["ebpf"], self.config.colors["userspace"]]
-        )
+        ax3.bar(implementations, error_variances, color=[self.config.colors["ebpf"], self.config.colors["userspace"]])
         ax3.set_ylabel("Error Rate Variance")
         ax3.set_title("Error Rate Consistency Across Nodes")
         ax3.grid(True, alpha=0.3)
@@ -879,7 +888,7 @@ class ThroughputAnalyzer:
 
     def create_detailed_metrics_comparison(self, analysis: Dict):
         """Create detailed metrics comparison heatmap."""
-        fig, ax = plt.subplots(figsize=(12, 8))
+        _, ax = plt.subplots(figsize=(12, 8))
 
         # Prepare data for heatmap
         metrics = [
@@ -958,7 +967,7 @@ class ThroughputAnalyzer:
 
         # Add text annotations
         for i in range(len(metrics)):
-            text = ax.text(0, i, f"{values[i][0]:.1f}%", ha="center", va="center", color="black", fontweight="bold")
+            ax.text(0, i, f"{values[i][0]:.1f}%", ha="center", va="center", color="black", fontweight="bold")
 
         ax.set_title("Performance Improvement Matrix\n(eBPF vs Userspace Baseline)", fontsize=14, fontweight="bold")
 
