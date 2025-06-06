@@ -70,14 +70,26 @@ class eBPFAnalyzer:
         """
         Load eBPF monitoring data from JSON files.
 
+        Supports both old timestamp-based files (ebpf_monitor_*.json) and
+        new descriptive filenames (*_ebpf.json).
+
         Returns:
             True if data loaded successfully, False otherwise
         """
         try:
-            ebpf_files = list(self.input_dir.glob("ebpf_monitor_*.json"))
+            # Look for both old and new file patterns
+            old_pattern_files = list(self.input_dir.glob("ebpf_monitor_*.json"))
+            new_pattern_files = list(self.input_dir.glob("*_ebpf.json"))
+
+            # Check monitoring subdirectory for new pattern files
+            monitoring_dir = self.input_dir / "monitoring"
+            if monitoring_dir.exists():
+                new_pattern_files.extend(list(monitoring_dir.glob("*_ebpf.json")))
+
+            ebpf_files = old_pattern_files + new_pattern_files
 
             if not ebpf_files:
-                logger.error(f"No eBPF monitoring files found in {self.input_dir}")
+                logger.error(f"No eBPF monitoring files found in {self.input_dir} or {monitoring_dir}")
                 return False
 
             logger.info(f"Found {len(ebpf_files)} eBPF monitoring files")
@@ -231,12 +243,16 @@ class eBPFAnalyzer:
             plt.style.use("default")
             sns.set_palette("husl")
 
+            # Always use top-level figures directory
+            figures_dir = self.output_dir.parent / "figures"
+            figures_dir.mkdir(exist_ok=True)
+
             for file_key, df in self.processed_data.items():
                 if df.empty:
                     continue
 
-                # Create figure directory
-                fig_dir = self.output_dir / "figures" / file_key
+                # Create subdirectory for each analysis
+                fig_dir = figures_dir / file_key
                 fig_dir.mkdir(parents=True, exist_ok=True)
 
                 # 1. Program Runtime Timeline
@@ -251,7 +267,7 @@ class eBPFAnalyzer:
                 # 4. Program Execution Frequency
                 self._plot_execution_frequency(df, fig_dir, file_key)
 
-                logger.info(f"Visualizations generated for {file_key}")
+                logger.info(f"Visualizations generated for {file_key} in {fig_dir}")
 
         except Exception as e:
             logger.error(f"Error generating visualizations: {e}")
@@ -283,7 +299,7 @@ class eBPFAnalyzer:
 
             # Save in multiple formats
             for fmt in ["png", "pdf", "svg"]:
-                plt.savefig(fig_dir / f"runtime_timeline.{fmt}", dpi=300, bbox_inches="tight")
+                plt.savefig(fig_dir / f"utilization_ebpf_runtime_timeline.{fmt}", dpi=300, bbox_inches="tight")
 
             plt.close()
 
@@ -315,7 +331,7 @@ class eBPFAnalyzer:
 
             # Save in multiple formats
             for fmt in ["png", "pdf", "svg"]:
-                plt.savefig(fig_dir / f"program_comparison.{fmt}", dpi=300, bbox_inches="tight")
+                plt.savefig(fig_dir / f"utilization_ebpf_program_comparison.{fmt}", dpi=300, bbox_inches="tight")
 
             plt.close()
 
@@ -347,7 +363,7 @@ class eBPFAnalyzer:
 
             # Save in multiple formats
             for fmt in ["png", "pdf", "svg"]:
-                plt.savefig(fig_dir / f"avg_runtime_per_call.{fmt}", dpi=300, bbox_inches="tight")
+                plt.savefig(fig_dir / f"utilization_ebpf_avg_runtime_per_call.{fmt}", dpi=300, bbox_inches="tight")
 
             plt.close()
 
@@ -377,7 +393,7 @@ class eBPFAnalyzer:
 
             # Save in multiple formats
             for fmt in ["png", "pdf", "svg"]:
-                plt.savefig(fig_dir / f"execution_frequency.{fmt}", dpi=300, bbox_inches="tight")
+                plt.savefig(fig_dir / f"utilization_ebpf_execution_frequency.{fmt}", dpi=300, bbox_inches="tight")
 
             plt.close()
 
@@ -400,7 +416,10 @@ class eBPFAnalyzer:
     def _generate_markdown_report(self):
         """Generate detailed Markdown report."""
         try:
-            report_path = self.output_dir / "ebpf_analysis_report.md"
+            # Create reports directory for markdown files
+            reports_dir = self.output_dir.parent / "reports"
+            reports_dir.mkdir(exist_ok=True)
+            report_path = reports_dir / "utilization_ebpf_analysis_report.md"
 
             with open(report_path, "w") as f:
                 f.write("# eBPF Program Utilization Analysis Report\n\n")
@@ -477,7 +496,10 @@ class eBPFAnalyzer:
     def _generate_json_report(self):
         """Generate JSON format report."""
         try:
-            report_path = self.output_dir / "ebpf_analysis_report.json"
+            # Create data directory for JSON files
+            data_dir = self.output_dir.parent / "data"
+            data_dir.mkdir(exist_ok=True)
+            report_path = data_dir / "utilization_ebpf_analysis_report.json"
 
             report_data = {
                 "metadata": {
@@ -538,15 +560,15 @@ def parse_args():
     parser.add_argument(
         "--input-dir",
         type=Path,
-        default=Path("logs"),
-        help="Directory containing eBPF monitoring JSON files (default: logs)",
+        default=Path("evaluation_results/data"),
+        help="Directory containing eBPF monitoring JSON files (default: evaluation_results/data)",
     )
 
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("ebpf_analysis"),
-        help="Directory to save analysis results (default: ebpf_analysis)",
+        default=Path("evaluation_results/figures"),
+        help="Directory to save analysis results (default: evaluation_results/figures)",
     )
 
     parser.add_argument(

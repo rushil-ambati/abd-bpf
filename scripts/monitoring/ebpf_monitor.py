@@ -224,7 +224,7 @@ class eBPFMonitor:
 
         try:
             # Save raw data
-            output_file = self.output_dir / f"ebpf_monitoring_{int(self.start_time)}.json"
+            output_file = self.output_dir / f"ebpf_monitor_{int(self.start_time)}.json"
 
             monitoring_data = {
                 "metadata": {

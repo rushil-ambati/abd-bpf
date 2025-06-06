@@ -74,10 +74,22 @@ class CPUAnalyzer:
             True if data was successfully loaded, False otherwise
         """
         try:
-            # Find the most recent CPU monitoring files
-            system_files = list(self.input_dir.glob("cpu_monitor_system_*.json"))
-            process_files = list(self.input_dir.glob("cpu_monitor_processes_*.json"))
-            core_files = list(self.input_dir.glob("cpu_monitor_cores_*.json"))
+            # Check for new monitoring subdirectory structure first
+            monitoring_dir = self.input_dir / "monitoring"
+            if monitoring_dir.exists():
+                search_dir = monitoring_dir
+                logger.info(f"Using monitoring subdirectory: {monitoring_dir}")
+                # Look for new descriptive filenames
+                system_files = list(search_dir.glob("*_cpu_system.json"))
+                process_files = list(search_dir.glob("*_cpu_processes.json"))
+                core_files = list(search_dir.glob("*_cpu_cores.json"))
+            else:
+                search_dir = self.input_dir
+                logger.info(f"Using data directory: {search_dir}")
+                # Look for old timestamp-based filenames
+                system_files = list(search_dir.glob("cpu_monitor_system_*.json"))
+                process_files = list(search_dir.glob("cpu_monitor_processes_*.json"))
+                core_files = list(search_dir.glob("cpu_monitor_cores_*.json"))
 
             if not system_files:
                 logger.error(f"No system CPU monitoring files found in {self.input_dir}")
@@ -445,9 +457,9 @@ class CPUAnalyzer:
 
         plt.tight_layout()
 
-        # Save the dashboard
+        # Save the dashboard with descriptive naming
         for fmt in ["png", "pdf", "svg"]:
-            output_file = self.output_dir / f"cpu_analysis_dashboard.{fmt}"
+            output_file = self.output_dir / f"utilization_userspace_dashboard.{fmt}"
             plt.savefig(output_file, dpi=300, bbox_inches="tight")
 
         plt.close()
@@ -455,13 +467,19 @@ class CPUAnalyzer:
 
     def save_analysis_report(self, analysis: Dict[str, Any]):
         """Save analysis report to JSON and markdown files."""
-        # Save detailed JSON report
-        json_file = self.output_dir / "cpu_analysis_report.json"
+        # Create subdirectories for proper organization
+        data_dir = self.output_dir.parent / "data"
+        reports_dir = self.output_dir.parent / "reports"
+        data_dir.mkdir(exist_ok=True)
+        reports_dir.mkdir(exist_ok=True)
+
+        # Save detailed JSON report to data directory
+        json_file = data_dir / "utilization_userspace_report.json"
         with open(json_file, "w") as f:
             json.dump(analysis, f, indent=2, default=str)
 
-        # Generate markdown report
-        md_file = self.output_dir / "cpu_analysis_report.md"
+        # Generate markdown report to reports directory
+        md_file = reports_dir / "utilization_userspace_report.md"
         with open(md_file, "w") as f:
             f.write("# ABD Protocol CPU Utilization Analysis Report\n\n")
             f.write(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
@@ -515,12 +533,14 @@ def main():
     """Main entry point for CPU analysis tool."""
     parser = argparse.ArgumentParser(description="Analyze ABD Protocol CPU monitoring data")
     parser.add_argument(
-        "--input-dir", default="logs", help="Directory containing CPU monitoring JSON files (default: logs)"
+        "--input-dir",
+        default="evaluation_results/data",
+        help="Directory containing CPU monitoring JSON files (default: evaluation_results/data)",
     )
     parser.add_argument(
         "--output-dir",
-        default="cpu_analysis_results",
-        help="Output directory for analysis results (default: cpu_analysis_results)",
+        default="evaluation_results/figures",
+        help="Output directory for analysis results (default: evaluation_results/figures)",
     )
     parser.add_argument(
         "--format",
