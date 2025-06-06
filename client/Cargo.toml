@@ -13,4 +13,4 @@ env_logger = { workspace = true }
 
 [[bin]]
 name = "client"
-path = "src/main.rs"
+path = "src/bin/main.rs"

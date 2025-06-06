@@ -1,7 +1,7 @@
 use core::{net::IpAddr, time::Duration};
 
 use heapless::{FnvIndexMap, String as HString};
-use rkyv::{rend::u32_le, Archive, Deserialize, Serialize};
+use rkyv::{rend::u32_le, traits::NoUndef, Archive, Deserialize, Serialize};
 
 use crate::constants::ABD_MAGIC;
 
@@ -63,6 +63,7 @@ impl AbdMessage {
         }
     }
 }
+unsafe impl NoUndef for ArchivedAbdMessage {}
 
 /// Enum representing the type of ABD protocol message.
 ///
@@ -178,16 +179,53 @@ impl TryFrom<u32> for AbdRole {
 
 /// Contents of an ABD message
 #[derive(rkyv::Archive, Copy, Clone, rkyv::Deserialize, rkyv::Serialize, Debug)]
-#[rkyv(compare(PartialEq), derive(Debug))]
+#[rkyv(compare(PartialEq), derive(Debug, Clone))]
 pub struct AbdMessageData {
     int: i64,
     text: [u8; 8],
     ip: IpAddr,
     duration: Duration,
-    point: (f32, f32),
+    point: Point,
     char_opt: Option<char>,
     person: [u8; 128],
     hashmap: [u8; 1024],
+}
+impl AbdMessageData {
+    /// Constructs a new `AbdMessageData` with the given parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `int` - An integer value.
+    /// * `text` - A text string (up to 8 bytes).
+    /// * `ip` - An IP address.
+    /// * `duration` - A duration value.
+    /// * `point` - A point represented by two floating-point numbers.
+    /// * `char_opt` - An optional character.
+    /// * `person` - JSON-encoded person metadata.
+    /// * `hashmap` - JSON-encoded hashmap.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub const fn new(
+        int: i64,
+        text: [u8; 8],
+        ip: IpAddr,
+        duration: Duration,
+        point: Point,
+        char_opt: Option<char>,
+        person: [u8; 128],
+        hashmap: [u8; 1024],
+    ) -> Self {
+        Self {
+            int,
+            text,
+            ip,
+            duration,
+            point,
+            char_opt,
+            person,
+            hashmap,
+        }
+    }
 }
 #[cfg(feature = "user")]
 impl Default for AbdMessageData {
@@ -197,13 +235,28 @@ impl Default for AbdMessageData {
             text: [0; 8],
             ip: core::net::Ipv4Addr::UNSPECIFIED.into(),
             duration: Duration::ZERO,
-            point: (0.0, 0.0),
+            point: Point { x: 0.0, y: 0.0 },
             char_opt: None,
             person: [0; 128],
             hashmap: [0; 1024],
         }
     }
 }
+impl Default for ArchivedAbdMessageData {
+    fn default() -> Self {
+        Self {
+            int: 0.into(),
+            text: [0; 8],
+            ip: rkyv::net::ArchivedIpAddr::V4(rkyv::net::ArchivedIpv4Addr::default()),
+            duration: rkyv::time::ArchivedDuration::default(),
+            point: ArchivedPoint::default(),
+            char_opt: rkyv::option::ArchivedOption::None,
+            person: [0; 128],
+            hashmap: [0; 1024],
+        }
+    }
+}
+
 #[cfg(feature = "user")]
 impl std::str::FromStr for AbdMessageData {
     type Err = String;
@@ -238,10 +291,10 @@ impl std::str::FromStr for AbdMessageData {
                 "point" => {
                     let val = val.trim_matches(|c| c == '(' || c == ')');
                     if let Some((x, y)) = val.split_once(',') {
-                        v.point = (
-                            x.trim().parse().unwrap_or(0.0),
-                            y.trim().parse().unwrap_or(0.0),
-                        );
+                        v.point = Point {
+                            x: x.trim().parse().unwrap_or(0.0),
+                            y: y.trim().parse().unwrap_or(0.0),
+                        };
                     }
                 }
                 "char_opt" => {
@@ -304,12 +357,22 @@ impl core::fmt::Display for AbdMessageData {
         writeln!(f, "    text:       \"{text}\",")?;
         writeln!(f, "    ip:         {},", self.ip)?;
         writeln!(f, "    duration:   {:#?},", self.duration)?;
-        writeln!(f, "    point:      ({}, {}),", self.point.0, self.point.1)?;
+        writeln!(f, "    point:      ({}, {}),", self.point.x, self.point.y)?;
         writeln!(f, "    char_opt:   {:#?},", self.char_opt)?;
         writeln!(f, "    person:     {person:?},")?;
         writeln!(f, "    hashmap:    {map:?},")?;
         write!(f, "}}")
     }
+}
+
+/// Struct representing a 2D point
+#[derive(
+    Copy, Clone, Debug, Default, PartialEq, rkyv::Archive, rkyv::Deserialize, rkyv::Serialize,
+)]
+#[rkyv(compare(PartialEq), derive(Debug, Clone, Default))]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
 }
 
 /// JSON-encoded person metadata

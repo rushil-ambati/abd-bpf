@@ -27,7 +27,7 @@ use aya_ebpf::{
     maps::Array,
     programs::XdpContext,
 };
-use aya_log_ebpf::{error, info};
+use aya_log_ebpf::error;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 use rkyv::munge::munge;
 
@@ -100,11 +100,11 @@ fn try_abd_xdp(ctx: &XdpContext) -> Result<u32, AbdError> {
     }
 }
 
-fn handle_read(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
+fn handle_read(_ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
     let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "server: READ from @{}", sender_id);
+    // info!(ctx, "server: READ from @{}", sender_id);
 
     update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 
@@ -120,11 +120,11 @@ fn handle_read(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Resul
     )
 }
 
-fn handle_write(ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
+fn handle_write(_ctx: &XdpContext, pkt: AbdContext, sender_role: AbdRole) -> Result<u32, AbdError> {
     let sender_id = pkt.msg.sender_id.to_native();
     let counter = pkt.msg.counter.to_native();
 
-    info!(ctx, "server: WRITE from @{}", sender_id);
+    // info!(ctx, "server: WRITE from @{}", sender_id);
 
     update_sender_counter_if_newer(sender_role, sender_id, counter)?;
 

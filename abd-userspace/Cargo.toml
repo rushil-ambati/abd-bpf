@@ -1,0 +1,29 @@
+[package]
+name = "abd-userspace"
+version = "0.1.0"
+edition = "2021"
+description = "Userspace implementation of ABD (Attiya, Bar-Noy, Dolev) protocol"
+authors = ["ABD Project"]
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["multi-writer"]
+multi-writer = []
+
+[dependencies]
+abd-common = { path = "../abd-common" }
+abd = { path = "../abd" }
+
+anyhow = { workspace = true, default-features = true }
+clap = { workspace = true, features = ["derive"] }
+env_logger = { workspace = true }
+log = { workspace = true }
+num_cpus = { workspace = true }
+rkyv = { workspace = true, default-features = true }
+socket2 = { workspace = true }
+thiserror = "1.0"
+tokio = { workspace = true, features = ["full", "signal"] }
+
+[[bin]]
+name = "abd-userspace"
+path = "src/bin/main.rs"

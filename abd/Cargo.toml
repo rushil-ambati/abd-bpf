@@ -17,9 +17,10 @@ env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 netns-rs = { workspace = true }
-network-interface = { workspace = true }
 num_cpus = { workspace = true }
 rkyv = { workspace = true, default-features = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 socket2 = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 clap = { workspace = true, features = ["derive"] }
@@ -32,10 +33,6 @@ abd-ebpf = { path = "../abd-ebpf" }
 [[bin]]
 name = "abd-ebpf"
 path = "src/bin/abd_ebpf.rs"
-
-[[bin]]
-name = "abd-userspace"
-path = "src/bin/abd_userspace.rs"
 
 [[bin]]
 name = "xdp-pass"

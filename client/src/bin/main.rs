@@ -7,7 +7,7 @@ use std::{
 use abd_common::{
     constants::ABD_UDP_PORT,
     message::{AbdMessage, AbdMessageData, AbdMessageType, AbdRole, ArchivedAbdMessage},
-    tag,
+    tag::{self, AbdTag},
 };
 use clap::{Args, Parser, Subcommand};
 use log::{debug, info, warn};
@@ -45,8 +45,8 @@ struct CommonOpts {
     counter: Option<u64>,
 
     /// Tag value
-    #[arg(short = 't', long)]
-    tag: Option<u64>,
+    #[arg(short = 't', long, value_parser = clap::value_parser!(AbdTag))]
+    tag: Option<AbdTag>,
 
     /// Send to server instead of reader/writer
     #[arg(long, default_value_t = false)]
@@ -83,9 +83,9 @@ fn main() -> anyhow::Result<()> {
     let (node_addr, msg, label) = match cli.command {
         Command::Write(opts) => {
             let node = opts.common.node;
-            let sender_id = opts.common.sender_id.unwrap_or(0);
-            let counter = opts.common.counter.unwrap_or(0);
-            let tag = opts.common.tag.unwrap_or(0);
+            let sender_id = opts.common.sender_id.unwrap_or_default();
+            let counter = opts.common.counter.unwrap_or_default();
+            let tag = opts.common.tag.unwrap_or_default();
 
             let recipient_role = if opts.common.server {
                 AbdRole::Server
@@ -111,7 +111,7 @@ fn main() -> anyhow::Result<()> {
             let mut label = format!("WRITE({})", opts.data);
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
+                let _ = write!(label, " tag={tag}");
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
@@ -153,7 +153,7 @@ fn main() -> anyhow::Result<()> {
             let mut label = "READ".to_string();
 
             if opts.common.tag.is_some() {
-                let _ = write!(label, " tag=<{},{}>", tag::seq(tag), tag::wid(tag));
+                let _ = write!(label, " tag={tag}");
             }
             if opts.common.counter.is_some() {
                 let _ = write!(label, " counter={counter}");
