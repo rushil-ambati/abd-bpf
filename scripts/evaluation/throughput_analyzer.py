@@ -418,7 +418,7 @@ class ThroughputAnalyzer:
         bars3 = ax3.bar(
             implementations, success_rates, color=[self.config.colors["ebpf"], self.config.colors["userspace"]]
         )
-        ax3.set_ylabel("Success Rate (%)")
+        ax3.set_ylabel("Success Rate (\\%)")
         ax3.set_title("Request Success Rate")
         ax3.set_ylim([min(success_rates) - 1, 100])
         ax3.grid(True, alpha=0.3)
@@ -547,7 +547,7 @@ class ThroughputAnalyzer:
         ax3.plot(ebpf_times, ebpf_success, label="eBPF", color=self.config.colors["ebpf"], linewidth=2)
         ax3.plot(user_times, user_success, label="Userspace", color=self.config.colors["userspace"], linewidth=2)
         ax3.set_xlabel("Time (seconds)")
-        ax3.set_ylabel("Success Rate (%)")
+        ax3.set_ylabel("Success Rate (\\%)")
         ax3.set_title("Success Rate Over Time")
         ax3.legend()
         ax3.grid(True, alpha=0.3)
@@ -708,7 +708,7 @@ class ThroughputAnalyzer:
             )
 
         ax2.set_xlabel("Actual Throughput (RPS)")
-        ax2.set_ylabel("Success Rate (%)")
+        ax2.set_ylabel("Success Rate (\\%)")
         ax2.set_title("Success Rate vs Throughput")
         ax2.legend()
         ax2.grid(True, alpha=0.3)
@@ -1042,7 +1042,7 @@ class ThroughputAnalyzer:
             )
 
         ax3.set_xlabel("Target RPS")
-        ax3.set_ylabel("Efficiency Loss (%)")
+        ax3.set_ylabel("Efficiency Loss (\\%)")
         ax3.set_title("Throughput Efficiency Loss vs Target Load")
         ax3.legend()
         ax3.grid(True, alpha=0.3)
@@ -1109,7 +1109,7 @@ class ThroughputAnalyzer:
         bars1 = ax1.bar(
             implementations, error_rates, color=[self.config.colors["ebpf"], self.config.colors["userspace"]]
         )
-        ax1.set_ylabel("Error Rate (%)")
+        ax1.set_ylabel("Error Rate (\\%)")
         ax1.set_title("Overall Error Rate")
         ax1.grid(True, alpha=0.3)
 
@@ -1142,7 +1142,7 @@ class ThroughputAnalyzer:
             ax2.bar(x + width / 2, user_node_rates, width, label="Userspace", color=self.config.colors["userspace"])
 
             ax2.set_xlabel("Node ID")
-            ax2.set_ylabel("Error Rate (%)")
+            ax2.set_ylabel("Error Rate (\\%)")
             ax2.set_title("Per-Node Error Rates")
             ax2.set_xticks(x)
             ax2.set_xticklabels([f"Node {node}" for node in nodes])
@@ -1299,11 +1299,11 @@ class ThroughputAnalyzer:
             "Overall RPS",
             "Write RPS",
             "Read RPS",
-            "Success Rate (%)",
+            "Success Rate (\\%)",
             "Avg Latency (μs)",
             "P95 Latency (μs)",
             "P99 Latency (μs)",
-            "Error Rate (%)",
+            "Error Rate (\\%)",
             "Thread Consistency",
             "Load Balance Quality",
         ]
@@ -1325,7 +1325,7 @@ class ThroughputAnalyzer:
             elif metric == "Read RPS":
                 ebpf_val = ebpf_stats["read_rps"]
                 user_val = user_stats["read_rps"]
-            elif metric == "Success Rate (%)":
+            elif metric == "Success Rate (\\%)":
                 ebpf_val = ebpf_stats["overall_success_rate"] * 100
                 user_val = user_stats["overall_success_rate"] * 100
             elif metric == "Avg Latency (μs)":
@@ -1338,7 +1338,7 @@ class ThroughputAnalyzer:
             elif metric == "P99 Latency (μs)":
                 ebpf_val = user_stats["p99_latency_us"]
                 user_val = ebpf_stats["p99_latency_us"]
-            elif metric == "Error Rate (%)":
+            elif metric == "Error Rate (\\%)":
                 # For error rate, lower is better, so invert
                 ebpf_val = user_stats["failure_rate"] * 100
                 user_val = ebpf_stats["failure_rate"] * 100
@@ -1377,7 +1377,7 @@ class ThroughputAnalyzer:
 
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax)
-        cbar.set_label("Improvement (%)", rotation=270, labelpad=20)
+        cbar.set_label("Improvement (\\%)", rotation=270, labelpad=20)
 
         plt.tight_layout()
 

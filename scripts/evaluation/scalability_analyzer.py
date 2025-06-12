@@ -835,7 +835,7 @@ class ScalabilityAnalyzer:
     def _create_coordination_overhead_chart(self, coordination_analysis: Dict[str, Any]):
         """Create chart showing coordination overhead analysis."""
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
         fig.suptitle("Coordination Overhead Analysis", fontsize=16, fontweight="bold")
 
         # Coordination Cost vs Node Count
@@ -856,30 +856,10 @@ class ScalabilityAnalyzer:
                 )
 
         ax1.set_xlabel("Number of Nodes")
-        ax1.set_ylabel("Coordination Overhead (\\%)")
+        ax1.set_ylabel("Coordination Overhead (\\%)")  # Use percent sign, not LaTeX
         ax1.set_title("Coordination Overhead vs Node Count")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-
-        # Majority Size Analysis
-        if coordination_analysis:
-            # Get data from first implementation that has results
-            first_impl = next(iter(coordination_analysis.keys()))
-            metrics = coordination_analysis[first_impl]
-            if metrics:
-                node_counts = [m["node_count"] for m in metrics]
-                majority_sizes = [m["majority_size"] for m in metrics]
-
-                ax2.bar(
-                    node_counts, majority_sizes, alpha=0.7, color=self.config.colors["neutral"], label="Majority Size"
-                )
-                ax2.plot(node_counts, node_counts, "r--", label="Total Nodes", alpha=0.7)
-
-        ax2.set_xlabel("Number of Nodes")
-        ax2.set_ylabel("Required Responses")
-        ax2.set_title("Majority Requirements vs Total Nodes")
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
 
@@ -893,7 +873,7 @@ class ScalabilityAnalyzer:
     def _create_performance_efficiency_chart(self, performance_trends: Dict[str, Any]):
         """Create chart showing performance efficiency trends."""
 
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+        fig, ax1 = plt.subplots(1, 1, figsize=(8, 6))
         fig.suptitle("Performance Efficiency Analysis", fontsize=16, fontweight="bold")
 
         # Performance Score vs Node Count
@@ -919,24 +899,6 @@ class ScalabilityAnalyzer:
         ax1.set_title("Overall Performance vs Node Count")
         ax1.legend()
         ax1.grid(True, alpha=0.3)
-
-        # Optimal Node Count Recommendations
-        optimal_data = []
-        for impl in ["ebpf", "userspace"]:
-            optimal_info = performance_trends[impl]["optimal_node_count"]
-            if isinstance(optimal_info, dict) and "optimal_count" in optimal_info:
-                optimal_data.append((impl, optimal_info["optimal_count"]))
-
-        if optimal_data:
-            implementations, optimal_counts = zip(*optimal_data)
-            colors = [self.config.colors[impl] for impl in implementations]
-
-            ax2.bar(range(len(implementations)), optimal_counts, color=colors, alpha=0.8)
-            ax2.set_xticks(range(len(implementations)))
-            ax2.set_xticklabels([impl.title() for impl in implementations])
-            ax2.set_ylabel("Optimal Node Count")
-            ax2.set_title("Recommended Optimal Node Count")
-            ax2.grid(True, alpha=0.3)
 
         plt.tight_layout()
 
@@ -1040,46 +1002,30 @@ class ScalabilityAnalyzer:
         for impl in ["ebpf", "userspace"]:
             metrics = analysis["coordination_overhead"].get(impl, [])
             if metrics and isinstance(metrics, list):
-                # pylint: disable=invalid-sequence-index
                 node_counts = [m["node_count"] for m in metrics if isinstance(m, dict) and "node_count" in m]
                 overhead = [
                     m["coordination_cost"] * 100 for m in metrics if isinstance(m, dict) and "coordination_cost" in m
                 ]
-                # pylint: enable=invalid-sequence-index
                 if node_counts and overhead and len(node_counts) == len(overhead):
-                    ax7.plot(node_counts, overhead, marker="o", label=impl.title(), color=self.config.colors[impl])
+                    ax7.plot(
+                        node_counts,
+                        overhead,
+                        marker="o",
+                        label=impl.title(),
+                        color=self.config.colors[impl],
+                    )
         ax7.set_title("Coordination Overhead")
         ax7.set_xlabel("Nodes")
-        ax7.set_ylabel("Overhead (%)")
+        ax7.set_ylabel("Overhead (\\%)")
         ax7.legend()
         ax7.grid(True, alpha=0.3)
 
-        # 8. Majority requirements (bottom-center)
+        # 8. (bottom-center) -- intentionally left blank (removed fault tolerance/majority graph)
         ax8 = fig.add_subplot(gs[2, 1])
-        majority_data = analysis["majority_analysis"]
-        if majority_data:
-            node_counts = sorted(list(majority_data.keys()))
-            majority_sizes = [majority_data[nc]["majority_size"] for nc in node_counts]
-            fault_tolerance = [majority_data[nc]["fault_tolerance"] for nc in node_counts]
+        ax8.axis("off")
 
-            ax8.plot(node_counts, majority_sizes, "b-o", label="Majority Size")
-            ax8.plot(node_counts, fault_tolerance, "r--s", label="Fault Tolerance")
-        ax8.set_title("Fault Tolerance vs Majority")
-        ax8.set_xlabel("Total Nodes")
-        ax8.set_ylabel("Node Count")
-        ax8.legend()
-        ax8.grid(True, alpha=0.3)
-
-        # 9. Recommendations summary (bottom-right)
+        # 9. (bottom-right) -- intentionally left blank (removed key insights)
         ax9 = fig.add_subplot(gs[2, 2])
-        ax9.text(0.1, 0.9, "Key Insights:", fontweight="bold", transform=ax9.transAxes)
-
-        recommendations = analysis["recommendations"][:6]  # Limit to 6 recommendations
-        for i, rec in enumerate(recommendations):
-            ax9.text(0.1, 0.8 - i * 0.12, f"• {rec[:50]}...", transform=ax9.transAxes, fontsize=9)
-
-        ax9.set_xlim(0, 1)
-        ax9.set_ylim(0, 1)
         ax9.axis("off")
 
         # Save dashboard
