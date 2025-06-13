@@ -200,7 +200,7 @@ class BenchmarkRunner:
 
         # Start CPU monitoring for userspace benchmarks
         cpu_monitor_started = False
-        if is_userspace and CPU_MONITORING_AVAILABLE:
+        if CPU_MONITORING_AVAILABLE:
             try:
                 cpu_logs_dir = self.config.data_dir
                 cpu_logs_dir.mkdir(exist_ok=True)

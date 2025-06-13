@@ -409,7 +409,7 @@ def main():
     generate_config(args.num_nodes, args.userspace)
 
     # Start CPU monitoring for userspace mode
-    if args.userspace and CPU_MONITORING_AVAILABLE:
+    if CPU_MONITORING_AVAILABLE:
         print("Starting CPU utilization monitoring for userspace mode...")
         try:
             start_cpu_monitoring(sample_interval=0.1, output_dir=LOGS)
